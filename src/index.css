@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+body {
+  font-family: 'Outfit', 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #fbfaf7;
+  color: #43392e;
+  overflow-x: hidden;
+}
+
+/* Custom Scrollbar for warm style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #fbfaf7;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #dad3c7;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #bcae97;
+}
+
+/* Smooth custom styles */
+.warm-glass {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(218, 211, 199, 0.4);
+}
+
+.glow-amber {
+  box-shadow: 0 0 15px rgba(217, 119, 6, 0.15);
+}
+
+.btn-hover-effect {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-hover-effect::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 120%;
+  height: 120%;
+  background: rgba(255, 255, 255, 0.1);
+  transform: translate(-50%, -50%) scale(0);
+  border-radius: 50%;
+  transition: transform 0.5s ease-out;
+}
+
+.btn-hover-effect:active::after {
+  transform: translate(-50%, -50%) scale(1);
+  transition: transform 0s;
+}
