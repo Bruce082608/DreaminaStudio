@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sliders, Music, Volume2, MoveLeft, MoveRight, HelpCircle, Scissors, Sparkles, RefreshCw, Type, Radio } from 'lucide-react';
+import { Sliders, Music, Volume2, MoveLeft, MoveRight, HelpCircle, Scissors, Sparkles, RefreshCw, Type, Radio, Film } from 'lucide-react';
 
 export default function VideoTimelineEditor({
   shots,
