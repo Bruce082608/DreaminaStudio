@@ -1,79 +1,179 @@
 import React, { useState } from 'react';
-import { Sparkles, FileText, RefreshCw, AlertCircle } from 'lucide-react';
+import { Sparkles, HelpCircle, ArrowRight, Lightbulb, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { generateCandidateScripts } from '../utils/workflowHelpers';
 
-export default function ScriptInput({ script, onScriptChange, onSplitScript, isSplitting }) {
-  const [localScript, setLocalScript] = useState(script);
+export default function ScriptInput({
+  onSplitScript, // Maps to selecting a script and moving to storyboard
+  isSplitting // Maps to candidate script generating loading state
+}) {
+  const [idea, setIdea] = useState('在塞纳河畔的转角，有一家售卖时光的咖啡馆。');
+  const [totalDuration, setTotalDuration] = useState(60);
+  const [candidates, setCandidates] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [selectedCandidateId, setSelectedCandidateId] = useState(null);
 
-  const handleSplit = () => {
-    onSplitScript(localScript);
+  const handleGenerateCandidates = (e) => {
+    e.preventDefault();
+    if (!idea.trim()) return;
+
+    setIsGenerating(true);
+    setTimeout(() => {
+      const generated = generateCandidateScripts(idea, totalDuration);
+      setCandidates(generated);
+      setIsGenerating(false);
+    }, 1500);
   };
 
-  const handleReset = () => {
-    if (window.confirm('确定要恢复默认剧本吗？这会覆盖当前输入的文本。')) {
-      onScriptChange('');
-      setLocalScript('');
-    }
+  const handleSelectScript = (candidate) => {
+    setSelectedCandidateId(candidate.id);
+    // Pass the detailed script text and target duration to start storyboard extraction
+    onSplitScript(candidate.scriptText, totalDuration);
+  };
+
+  const handleBack = () => {
+    setCandidates([]);
+    setSelectedCandidateId(null);
   };
 
   return (
     <div className="bg-white rounded-2xl border border-stone-200/60 shadow-sm p-5 flex flex-col h-full transition-all hover:shadow-md hover:shadow-stone-100">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <div className="p-2 bg-amber-50 text-amber-700 rounded-lg">
-            <FileText size={18} />
-          </div>
-          <div>
-            <h3 className="font-semibold text-stone-800 text-sm tracking-wide">原始剧本编辑</h3>
-            <p className="text-xs text-stone-400">支持Markdown格式与角色场景标注</p>
-          </div>
-        </div>
-        <button
-          onClick={handleReset}
-          className="p-1.5 text-stone-400 hover:text-rose-600 rounded-md hover:bg-rose-50 transition-colors"
-          title="清空剧本"
-        >
-          <RefreshCw size={14} className={isSplitting ? 'animate-spin' : ''} />
-        </button>
-      </div>
+      {/* If Candidates have not been generated, show Idea Input Form */}
+      {candidates.length === 0 ? (
+        <form onSubmit={handleGenerateCandidates} className="flex flex-col h-full justify-between">
+          <div className="space-y-4">
+            {/* Header */}
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-amber-50 text-amber-700 rounded-lg">
+                <Lightbulb size={18} />
+              </div>
+              <div>
+                <h3 className="font-semibold text-stone-800 text-sm tracking-wide">创意想法采集</h3>
+                <p className="text-xs text-stone-400">输入您的短短想法，AI将生成3套视听剧本</p>
+              </div>
+            </div>
 
-      {/* Script Textarea */}
-      <div className="flex-1 relative mb-4">
-        <textarea
-          value={localScript}
-          onChange={(e) => {
-            setLocalScript(e.target.value);
-            onScriptChange(e.target.value);
-          }}
-          disabled={isSplitting}
-          placeholder="在此粘贴或输入您的原创剧本，例如：&#10;【镜头 1】&#10;苏菲走进咖啡馆...&#10;（角色：苏菲 | 画面动作：推开木门...）"
-          className="w-full h-full min-h-[260px] bg-stone-50/50 border border-stone-200 focus:border-amber-500 focus:ring-2 focus:ring-amber-100 rounded-xl p-4 text-stone-700 text-sm leading-relaxed focus:outline-none resize-none transition-all scrollbar-thin"
-        />
-        {localScript.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-6">
-            <div className="text-center max-w-xs">
-              <AlertCircle className="mx-auto text-stone-300 mb-2" size={24} />
-              <p className="text-xs text-stone-400">暂无内容，你可以粘贴自备剧本，或点击右上角重置按钮加载Demo剧本。</p>
+            {/* Input textarea */}
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-stone-700 block">短短的创意想法:</label>
+              <textarea
+                value={idea}
+                onChange={(e) => setIdea(e.target.value)}
+                placeholder="例如：一个关于时光穿梭的咖啡馆，旅人可以通过喝特调咖啡找回遗忘的记忆..."
+                className="w-full h-40 bg-stone-50/50 border border-stone-200 focus:border-amber-500 focus:ring-2 focus:ring-amber-100 rounded-xl p-3 text-stone-700 text-xs leading-relaxed focus:outline-none resize-none transition-all scrollbar-thin"
+                required
+              />
+            </div>
+
+            {/* Target Duration selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-stone-700 flex items-center gap-1">
+                <Clock size={12} className="text-stone-400" />
+                期望视频总时长:
+              </label>
+              <div className="flex bg-stone-100 p-0.5 rounded-lg">
+                {[30, 60, 90].map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => setTotalDuration(sec)}
+                    className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                      totalDuration === sec
+                        ? 'bg-white text-stone-850 shadow-sm border-stone-200'
+                        : 'text-stone-500 hover:text-stone-700'
+                    }`}
+                  >
+                    {sec}s 时长 {sec === 30 ? '(微短)' : sec === 60 ? '(标准)' : '(剧场)'}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        )}
-      </div>
 
-      {/* Action Button */}
-      <button
-        onClick={handleSplit}
-        disabled={isSplitting || !localScript.trim()}
-        className={`flex items-center justify-center gap-2 w-full py-3 px-4 rounded-xl font-medium shadow-sm transition-all duration-300 text-sm active:scale-[0.98] ${
-          isSplitting
-            ? 'bg-amber-100 text-amber-500 cursor-not-allowed'
-            : !localScript.trim()
-            ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
-            : 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white shadow-amber-600/10'
-        }`}
-      >
-        <Sparkles size={16} className={`${isSplitting ? 'animate-pulse' : 'group-hover:animate-bounce'}`} />
-        {isSplitting ? '正在解析剧本并提取分镜...' : '智能拆解分镜'}
-      </button>
+          {/* Action button */}
+          <button
+            type="submit"
+            disabled={isGenerating || !idea.trim()}
+            className={`mt-6 w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium shadow-sm transition-all duration-300 text-sm active:scale-[0.98] ${
+              isGenerating
+                ? 'bg-amber-100 text-amber-500 cursor-not-allowed border border-amber-200/20'
+                : 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-600/10'
+            }`}
+          >
+            <Sparkles size={16} className={isGenerating ? 'animate-pulse' : ''} />
+            <span>{isGenerating ? 'AI 正在构思候选剧本...' : '生成候选剧本方案'}</span>
+          </button>
+        </form>
+      ) : (
+        // Candidates Selection View
+        <div className="flex flex-col h-full justify-between overflow-y-auto pr-1 scrollbar-thin">
+          <div className="space-y-4">
+            {/* Header & Back Button */}
+            <div className="flex items-center justify-between pb-2 border-b border-stone-100">
+              <button
+                onClick={handleBack}
+                className="flex items-center gap-1 text-xs text-stone-500 hover:text-stone-800 transition-colors"
+              >
+                <ArrowLeft size={12} />
+                <span>返回修改创意</span>
+              </button>
+              <span className="text-[10px] bg-amber-50 text-amber-800 px-2 py-0.5 rounded-full font-medium">
+                AI 企划已就绪
+              </span>
+            </div>
+
+            <span className="text-xs font-semibold text-stone-700 block">请选择一套心仪的视觉剧本:</span>
+
+            {/* Candidates Lists */}
+            <div className="space-y-3">
+              {candidates.map((cand) => {
+                const isSelected = selectedCandidateId === cand.id;
+                return (
+                  <div
+                    key={cand.id}
+                    className={`p-3.5 border rounded-xl flex flex-col gap-2 transition-all text-xs cursor-pointer ${
+                      isSelected
+                        ? 'border-amber-500 bg-amber-50/10 shadow-sm'
+                        : 'border-stone-200 bg-stone-50/40 hover:bg-stone-50 hover:border-stone-300'
+                    }`}
+                    onClick={() => handleSelectScript(cand)}
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <h4 className="font-bold text-stone-800 text-xs truncate">{cand.title}</h4>
+                      <span className="text-[9px] text-stone-400 font-mono shrink-0">
+                        分镜数: {cand.estimatedShots}
+                      </span>
+                    </div>
+
+                    <span className="inline-block text-[10px] px-1.5 py-0.2 bg-amber-50 border border-amber-200/40 text-amber-800 rounded-md self-start font-medium">
+                      {cand.tone}
+                    </span>
+
+                    <p className="text-[11px] text-stone-500 leading-normal">
+                      {cand.summary}
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Avoid double click trigger
+                        handleSelectScript(cand);
+                      }}
+                      className={`w-full py-1.5 mt-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
+                        isSelected
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'bg-amber-600 hover:bg-amber-700 text-white'
+                      }`}
+                    >
+                      {isSelected ? <CheckCircle2 size={12} /> : <ArrowRight size={12} />}
+                      <span>{isSelected ? '已选定此方案' : '选定此剧本方案'}</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
