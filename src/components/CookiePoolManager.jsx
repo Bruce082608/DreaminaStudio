@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
-import { Key, Plus, Trash2, RefreshCw, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
+import { useState } from 'react';
+import { Key, Plus, Trash2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function CookiePoolManager({
   cookies,
   onAddCookie,
-  onUpdateCookie,
   onDeleteCookie,
   onValidateCookie
 }) {

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Users, Plus, Trash2, Wand2, Check, UserPlus } from 'lucide-react';
+import { useState } from 'react';
+import { Users, Plus, Trash2, Wand2, Check } from 'lucide-react';
 import { mockAvatars } from '../mockData';
 
 export default function CharacterManager({ characters, onAddCharacter, onUpdateCharacter, onDeleteCharacter }) {

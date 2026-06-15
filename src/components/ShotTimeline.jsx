@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Film, Play, AlertCircle, Plus, Trash2, Clock, ChevronDown, Sparkles, Copy, Check, RotateCcw, Cpu, CheckCircle } from 'lucide-react';
 import { generateFinalPrompt } from '../utils/workflowHelpers';
 

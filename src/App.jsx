@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Play, Award, RotateCcw, Laptop, HardDrive, Cpu, Film } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Award, RotateCcw, Laptop, HardDrive, Cpu, Film } from 'lucide-react';
 import ScriptInput from './components/ScriptInput';
 import CharacterManager from './components/CharacterManager';
 import CookiePoolManager from './components/CookiePoolManager';
@@ -9,7 +9,6 @@ import HistoryList from './components/HistoryList';
 import VideoTimelineEditor from './components/VideoTimelineEditor';
 import { parseScriptToStoryboard, generateFinalPrompt } from './utils/workflowHelpers';
 import {
-  initialScript,
   initialCharacters,
   initialShots,
   initialHistory,
@@ -38,7 +37,6 @@ const defaultCookies = [
 
 export default function App() {
   // Global Workflow State
-  const [script, setScript] = useState(initialScript);
   const [characters, setCharacters] = useState(initialCharacters);
   const [shots, setShots] = useState(initialShots);
   const [history, setHistory] = useState(initialHistory);
@@ -73,71 +71,34 @@ export default function App() {
     };
   }, []);
 
-  // ==========================================
-  // Task Queue Scheduler with Cookie Allocation
-  // ==========================================
-  useEffect(() => {
-    // Only schedule if the user has approved the storyboard
-    if (!isApproved) return;
-
-    const generating = shots.filter(s => s.status === 'generating');
-    const waiting = shots.filter(s => s.status === 'waiting');
-
-    // Check if slots are available (concurrency < 2) and tasks are in queue
-    if (generating.length < 2 && waiting.length > 0) {
-      const slotsAvailable = 2 - generating.length;
-      const toStart = waiting.slice(0, slotsAvailable);
-
-      const shotsStarted = [];
-      const shotsFailedNoCookie = [];
-      let tempCookies = [...cookies];
-
-      toStart.forEach(shot => {
-        if (shot.engine === 'jimeng') {
-          const availableCookie = tempCookies.find(c => c.status === 'active' && c.activeTasks < 2);
-          if (availableCookie) {
-            availableCookie.activeTasks += 1;
-            shotsStarted.push({ shot, cookieId: availableCookie.id });
-          } else {
-            shotsFailedNoCookie.push(shot);
+  // Release Cookie Slot and update its health
+  function handleTaskEnd(engineKey, cookieId, success) {
+    if (engineKey === 'jimeng' && cookieId) {
+      setCookies(prev => prev.map(c => {
+        if (c.id === cookieId) {
+          const newFailCount = success ? 0 : c.failCount + 1;
+          const newStatus = newFailCount >= 3 ? 'expired' : c.status;
+          
+          if (newStatus === 'expired') {
+            setTimeout(() => {
+              showToast(`账号 [${c.alias}] 连续生成失败 3 次，已被下线保护！`, 'error');
+            }, 200);
           }
-        } else {
-          shotsStarted.push({ shot, cookieId: null });
-        }
-      });
 
-      // Update state for shots
-      setShots(prev => prev.map(s => {
-        const started = shotsStarted.find(x => x.shot.id === s.id);
-        if (started) {
-          return { ...s, status: 'generating', progress: 0, error: null };
-        }
-        if (shotsFailedNoCookie.some(x => x.id === s.id)) {
           return {
-            ...s,
-            status: 'failed',
-            error: '逆向网关异常：即梦 Cookie 账号池无空闲可用节点 (账号占满或已失效)',
-            progress: 0
+            ...c,
+            activeTasks: Math.max(0, c.activeTasks - 1),
+            failCount: newFailCount,
+            status: newStatus
           };
         }
-        return s;
+        return c;
       }));
-
-      setCookies(tempCookies);
-
-      // Fire the asynchronous simulated generation tasks
-      shotsStarted.forEach(item => {
-        runMockGeneration(item.shot.id, item.shot.engine || 'jimeng', item.cookieId);
-      });
-
-      if (shotsFailedNoCookie.length > 0) {
-        showToast('部分即梦分镜启动失败：所有逆向 Cookie 账号均在忙碌或已失效', 'error');
-      }
     }
-  }, [shots, cookies, isApproved]);
+  }
 
   // Execute Mock Generation
-  const runMockGeneration = (shotId, engineKey, cookieId) => {
+  function runMockGeneration(shotId, engineKey, cookieId) {
     const config = ENGINE_INFO[engineKey] || { name: '即梦-API', delay: 250, errorRate: 0.05 };
     
     if (activeIntervals.current[shotId]) {
@@ -201,33 +162,72 @@ export default function App() {
     }, config.delay);
 
     activeIntervals.current[shotId] = interval;
-  };
+  }
 
-  // Release Cookie Slot and update its health
-  const handleTaskEnd = (engineKey, cookieId, success) => {
-    if (engineKey === 'jimeng' && cookieId) {
-      setCookies(prev => prev.map(c => {
-        if (c.id === cookieId) {
-          const newFailCount = success ? 0 : c.failCount + 1;
-          const newStatus = newFailCount >= 3 ? 'expired' : c.status;
-          
-          if (newStatus === 'expired') {
-            setTimeout(() => {
-              showToast(`账号 [${c.alias}] 连续生成失败 3 次，已被下线保护！`, 'error');
-            }, 200);
+  // ==========================================
+  // Task Queue Scheduler with Cookie Allocation
+  // ==========================================
+  useEffect(() => {
+    // Only schedule if the user has approved the storyboard
+    if (!isApproved) return;
+
+    const generating = shots.filter(s => s.status === 'generating');
+    const waiting = shots.filter(s => s.status === 'waiting');
+
+    // Check if slots are available (concurrency < 2) and tasks are in queue
+    if (generating.length < 2 && waiting.length > 0) {
+      const slotsAvailable = 2 - generating.length;
+      const toStart = waiting.slice(0, slotsAvailable);
+
+      const shotsStarted = [];
+      const shotsFailedNoCookie = [];
+      let tempCookies = [...cookies];
+
+      toStart.forEach(shot => {
+        if (shot.engine === 'jimeng') {
+          const availableCookie = tempCookies.find(c => c.status === 'active' && c.activeTasks < 2);
+          if (availableCookie) {
+            availableCookie.activeTasks += 1;
+            shotsStarted.push({ shot, cookieId: availableCookie.id });
+          } else {
+            shotsFailedNoCookie.push(shot);
           }
+        } else {
+          shotsStarted.push({ shot, cookieId: null });
+        }
+      });
 
+      // Update state for shots
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setShots(prev => prev.map(s => {
+        const started = shotsStarted.find(x => x.shot.id === s.id);
+        if (started) {
+          return { ...s, status: 'generating', progress: 0, error: null };
+        }
+        if (shotsFailedNoCookie.some(x => x.id === s.id)) {
           return {
-            ...c,
-            activeTasks: Math.max(0, c.activeTasks - 1),
-            failCount: newFailCount,
-            status: newStatus
+            ...s,
+            status: 'failed',
+            error: '逆向网关异常：即梦 Cookie 账号池无空闲可用节点 (账号占满或已失效)',
+            progress: 0
           };
         }
-        return c;
+        return s;
       }));
+
+      setCookies(tempCookies);
+
+      // Fire the asynchronous simulated generation tasks
+      shotsStarted.forEach(item => {
+        runMockGeneration(item.shot.id, item.shot.engine || 'jimeng', item.cookieId);
+      });
+
+      if (shotsFailedNoCookie.length > 0) {
+        showToast('部分即梦分镜启动失败：所有逆向 Cookie 账号均在忙碌或已失效', 'error');
+      }
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shots, cookies, isApproved]);
 
   // ==========================================
   // Cookie Pool Handlers
@@ -392,6 +392,12 @@ export default function App() {
     setIsCompiling(true);
     setCompileProgress(0);
 
+    const hasParams = mixingParams && typeof mixingParams === 'object' && 'bgm' in mixingParams;
+    const bgmKey = hasParams ? mixingParams.bgm : 'lofi';
+    const bgmVol = hasParams ? mixingParams.bgmVolume : 30;
+    const voiceVol = hasParams ? mixingParams.voiceVolume : 80;
+    const duration = hasParams ? mixingParams.totalDuration : shots.reduce((acc, curr) => acc + (curr.duration || 0), 0);
+
     let progress = 0;
     const timer = setInterval(() => {
       progress += Math.floor(Math.random() * 8) + 3;
@@ -406,17 +412,28 @@ export default function App() {
         // Add to history list
         const newHistoryItem = {
           id: `hist-${Date.now()}`,
-          title: `剪辑出品 - BGM:${mixingParams.bgm === 'lofi' ? 'Lofi' : mixingParams.bgm === 'epic' ? '交响' : '吉他'} (#${history.length + 1})`,
+          title: `剪辑出品 - BGM:${bgmKey === 'lofi' ? 'Lofi' : bgmKey === 'epic' ? '交响' : '吉他'} (#${history.length + 1})`,
           date: new Date().toISOString().replace('T', ' ').substring(0, 16),
-          duration: mixingParams.totalDuration,
+          duration: duration,
           videoUrl: finalVideo
         };
         setHistory(prev => [newHistoryItem, ...prev]);
-        showToast(`压制成功！BGM音量:${mixingParams.bgmVolume}%, 台词音量:${mixingParams.voiceVolume}%`);
+        showToast(`压制成功！BGM音量:${bgmVol}%, 台词音量:${voiceVol}%`);
       } else {
         setCompileProgress(progress);
       }
     }, 180);
+  };
+
+  // History Selection & Deletion Handlers
+  const handleSelectHistory = (item) => {
+    setCompiledVideoUrl(item.videoUrl);
+    showToast(`已载入历史成片: ${item.title}`);
+  };
+
+  const handleDeleteHistory = (id) => {
+    setHistory(prev => prev.filter(h => h.id !== id));
+    showToast('历史记录已删除');
   };
 
   // Load Presets / Revert to Demo state
@@ -425,7 +442,6 @@ export default function App() {
       Object.values(activeIntervals.current).forEach(clearInterval);
       activeIntervals.current = {};
 
-      setScript(initialScript);
       setCharacters(initialCharacters);
       setShots(initialShots);
       setIsApproved(true); // Demo is pre-approved
@@ -467,7 +483,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-base font-bold tracking-tight text-stone-900 flex items-center gap-1.5">
-                AI短剧/小剧场一体化工作流控制台
+                梦之镜DreaminaStudio
                 <span className="text-[10px] font-medium px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full">v1.5 Studio</span>
               </h1>
               <p className="text-xs text-stone-400">创意想法提案到内置剪辑轨道压制输出</p>
@@ -590,7 +606,7 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-stone-200/50 bg-white py-4 px-6 text-center text-[10px] text-stone-400">
         <p className="w-full flex items-center justify-between">
-          <span>© 2026 PlotDream. AI 导演协同创作平台.</span>
+          <span>© 2026 DreaminaStudio. AI 导演协同创作平台.</span>
           <span className="flex items-center gap-1"><Award size={10} /> 任务队列调度与多引擎路由控制中心</span>
         </p>
       </footer>

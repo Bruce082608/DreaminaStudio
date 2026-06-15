@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Film, Play, Download, Sparkles, AlertTriangle, MonitorPlay, HelpCircle } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Film, Download, Sparkles, AlertTriangle, MonitorPlay } from 'lucide-react';
 
 export default function GlobalPreview({
   shots,
@@ -8,35 +8,29 @@ export default function GlobalPreview({
   compiledVideoUrl,
   onCompile
 }) {
-  const [compileStage, setCompileStage] = useState('');
   const [subtitle, setSubtitle] = useState('');
   const videoRef = useRef(null);
 
-  // Sync compile stages with progress
-  useEffect(() => {
-    if (!isCompiling) {
-      setCompileStage('');
-      return;
-    }
-
+  // Compute compile stage inline during render
+  let compileStage = '';
+  if (isCompiling) {
     if (compileProgress < 20) {
-      setCompileStage('读取分镜画面与音轨资产...');
+      compileStage = '读取分镜画面与音轨资产...';
     } else if (compileProgress < 50) {
-      setCompileStage('缝合拼接视频片段，渲染平滑转场...');
+      compileStage = '缝合拼接视频片段，渲染平滑转场...';
     } else if (compileProgress < 75) {
-      setCompileStage('混合背景音乐并进行音量均衡调整...');
+      compileStage = '混合背景音乐并进行音量均衡调整...';
     } else if (compileProgress < 95) {
-      setCompileStage('渲染嵌入式字幕并进行色彩校正...');
+      compileStage = '渲染嵌入式字幕并进行色彩校正...';
     } else {
-      setCompileStage('做最后的文件打包与流优化...');
+      compileStage = '做最后的文件打包与流优化...';
     }
-  }, [compileProgress, isCompiling]);
+  }
 
   // Simulated subtitles during video playback
   const handleTimeUpdate = () => {
     if (!videoRef.current) return;
     const time = videoRef.current.currentTime;
-    const duration = videoRef.current.duration;
 
     if (time < 4) {
       setSubtitle('苏菲推开了咖啡馆的木门，暖暖的阳光洒在她的发梢。');

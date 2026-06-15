@@ -1,4 +1,3 @@
-import React from 'react';
 import { History, Play, Trash2, Calendar, Clock, Film } from 'lucide-react';
 
 export default function HistoryList({ history, activeVideoUrl, onSelectHistory, onDeleteHistory }) {

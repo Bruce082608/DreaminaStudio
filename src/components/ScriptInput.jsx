@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
-import { Sparkles, HelpCircle, ArrowRight, Lightbulb, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { useState } from 'react';
+import { Sparkles, ArrowRight, Lightbulb, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { generateCandidateScripts } from '../utils/workflowHelpers';
 
 export default function ScriptInput({
-  onSplitScript, // Maps to selecting a script and moving to storyboard
-  isSplitting // Maps to candidate script generating loading state
+  onSplitScript // Maps to selecting a script and moving to storyboard
 }) {
   const [idea, setIdea] = useState('在塞纳河畔的转角，有一家售卖时光的咖啡馆。');
   const [totalDuration, setTotalDuration] = useState(60);

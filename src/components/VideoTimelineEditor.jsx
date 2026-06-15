@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Sliders, Music, Volume2, MoveLeft, MoveRight, HelpCircle, Scissors, Sparkles, RefreshCw, Type, Radio, Film } from 'lucide-react';
+import { useState, Fragment } from 'react';
+import { Sliders, Music, Volume2, MoveLeft, MoveRight, Scissors, Sparkles, Type, Radio, Film } from 'lucide-react';
 
 export default function VideoTimelineEditor({
   shots,
@@ -131,7 +131,7 @@ export default function VideoTimelineEditor({
             {shots.map((shot, idx) => {
               const hasVideo = shot.status === 'completed' && shot.videoUrl;
               return (
-                <React.Fragment key={shot.id}>
+                <Fragment key={shot.id}>
                   {/* Clip Block Card */}
                   <div className="flex-none w-[200px] bg-stone-850 border border-stone-800 rounded-xl p-3 flex flex-col justify-between gap-3 relative transition-all hover:border-stone-700">
                     
@@ -224,7 +224,7 @@ export default function VideoTimelineEditor({
                       </select>
                     </div>
                   )}
-                </React.Fragment>
+                </Fragment>
               );
             })}
           </div>
