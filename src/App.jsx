@@ -32,7 +32,8 @@ import {
 } from 'lucide-react';
 import './App.css';
 
-const ONBOARDING_KEY = 'dreamina-studio-intro-seen';
+const HOME_ROUTE = '#/';
+const CREATE_ROUTE = '#/create';
 
 const durationOptions = [
   { label: '30秒', value: 30, scenes: 3 },
@@ -44,6 +45,24 @@ const durationOptions = [
 
 const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
 const ratioOptions = ['16:9', '9:16', '1:1'];
+
+const visualAssets = {
+  neonCity:
+    'https://images.unsplash.com/photo-1636414795389-2cd7bb362560?auto=format&fit=crop&w=1200&q=80',
+  editingTimeline:
+    'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
+  storyboard:
+    'https://images.unsplash.com/photo-1681372751506-1586b0542195?auto=format&fit=crop&w=1200&q=80',
+  filmSet:
+    'https://images.unsplash.com/photo-1750905014980-c0e6ab6f3fbb?auto=format&fit=crop&w=1200&q=80',
+  controlRoom:
+    'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
+  productionDesk:
+    'https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1200&q=80',
+};
+
+const painVisuals = [visualAssets.editingTimeline, visualAssets.neonCity, visualAssets.productionDesk];
+const valueVisuals = [visualAssets.storyboard, visualAssets.neonCity, visualAssets.controlRoom, visualAssets.filmSet];
 
 const agentStages = [
   '解析创意意图',
@@ -118,6 +137,30 @@ const introFlow = [
   { title: '交付成片', text: '自动汇总片段，输出完整视频。' },
 ];
 
+const teamHighlights = [
+  {
+    icon: Sparkles,
+    title: '我们在做什么',
+    text: '把 AI 视频生成从单次片段推进到完整成片，让创意、分镜、生成、重试和合成进入同一个工作流。',
+  },
+  {
+    icon: Workflow,
+    title: '为什么现在做',
+    text: '短视频生成模型已经足够强，但真正的长内容交付仍缺少编排层、上下文层和生产管理层。',
+  },
+  {
+    icon: Bot,
+    title: '我们相信什么',
+    text: '未来的视频创作不是一个提示词换一个片段，而是人负责判断，Agent 负责执行，系统负责交付。',
+  },
+];
+
+const partnerNeeds = [
+  '前端 / 全栈：继续打磨创作工作台与产品化体验',
+  'AI 工程：构建分镜、提示词、任务调度与合成 Agent',
+  '增长 / 商业：验证创作者、品牌方、教育机构等真实付费场景',
+];
+
 function IntroPage({ onStart }) {
   const [heroFade, setHeroFade] = useState(1);
 
@@ -168,8 +211,13 @@ function IntroPage({ onStart }) {
           <Film size={20} />
           <span>Dreamina Studio</span>
         </div>
+        <div className="intro-nav-links">
+          <a href="#mission">使命</a>
+          <a href="#product">产品</a>
+          <a href="#partners">合伙人</a>
+        </div>
         <button className="ghost-button" onClick={onStart}>
-          进入工作台
+          开始创作
           <ChevronRight size={16} />
         </button>
       </nav>
@@ -181,24 +229,28 @@ function IntroPage({ onStart }) {
         >
           <div className="eyebrow">
             <Sparkles size={14} />
-            即梦长视频创作中枢
+            AI 长视频创作团队
           </div>
           <h1>
-            <span>一念成片</span>
-            <span>十分钟长片</span>
-            <span>自成篇章</span>
+            <span>把 15 秒片段</span>
+            <span>编排成完整作品</span>
+            <span>Dreamina Studio</span>
           </h1>
           <p>
-            以即梦为生成引擎，以专属 agent 负责长片编排。你只需给出创意与参考图，系统会规划连续分镜、承接上下文，并合成最长 10 分钟的视频作品。
+            我们正在搭建 AI 视频时代的长视频创作中枢：让用户从一个想法出发，获得结构、分镜、提示词、生成队列和最终成片，而不是独自管理一堆割裂的短片段。
           </p>
           <div className="hero-actions">
             <button className="primary-button" onClick={onStart}>
               开始创作
               <ArrowRight size={18} />
             </button>
+            <a className="secondary-link-button" href="#partners">
+              寻找合伙人
+              <ChevronRight size={16} />
+            </a>
             <div className="hero-proof">
               <BadgeCheck size={16} />
-              <span>把 15 秒生成边界延展为完整叙事</span>
+              <span>从短片段生成走向长视频成片交付</span>
             </div>
           </div>
         </div>
@@ -211,6 +263,7 @@ function IntroPage({ onStart }) {
             <strong>长片编排台</strong>
           </div>
           <div className="console-video">
+            <img className="console-video-image" src={visualAssets.editingTimeline} alt="" loading="lazy" />
             <div className="play-ring">
               <Play size={28} fill="currentColor" />
             </div>
@@ -250,6 +303,36 @@ function IntroPage({ onStart }) {
         </div>
       </section>
 
+      <section className="intro-section team-section reveal" id="mission">
+        <div className="section-kicker">
+          <Sparkles size={16} />
+          团队使命
+        </div>
+        <div className="team-layout">
+          <div className="intro-section-head">
+            <h2>我们想做 AI 视频时代的长视频创作基础设施。</h2>
+            <p>
+              Dreamina Studio 不是重新造一个视频模型，而是在强大的生成模型之上，补齐从想法到成片之间最难、最琐碎、也最有价值的编排层。
+            </p>
+          </div>
+          <div className="team-card-stack">
+            {teamHighlights.map((item) => {
+              const Icon = item.icon;
+              return (
+                <article className="motion-card team-card" key={item.title}>
+                  <div className="card-media">
+                    <img src={visualAssets.controlRoom} alt="" loading="lazy" />
+                  </div>
+                  <Icon size={21} />
+                  <h3>{item.title}</h3>
+                  <p>{item.text}</p>
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
       <section className="intro-section pain-section reveal">
         <div className="section-kicker">
           <AlertTriangle size={16} />
@@ -264,6 +347,9 @@ function IntroPage({ onStart }) {
             const Icon = item.icon;
             return (
               <article className={`motion-card pain-card pain-card-${index + 1}`} key={item.title}>
+                <div className="card-media">
+                  <img src={painVisuals[index]} alt="" loading="lazy" />
+                </div>
                 <Icon size={22} />
                 <h3>{item.title}</h3>
                 <p>{item.text}</p>
@@ -273,7 +359,7 @@ function IntroPage({ onStart }) {
         </div>
       </section>
 
-      <section className="intro-section value-section reveal">
+      <section className="intro-section value-section reveal" id="product">
         <div className="section-kicker">
           <Route size={16} />
           长片生产线
@@ -289,6 +375,9 @@ function IntroPage({ onStart }) {
             const Icon = item.icon;
             return (
               <article className={`motion-card value-card value-card-${index + 1}`} key={item.title}>
+                <div className="card-media">
+                  <img src={valueVisuals[index]} alt="" loading="lazy" />
+                </div>
                 <div className="card-icon">
                   <Icon size={21} />
                 </div>
@@ -297,6 +386,33 @@ function IntroPage({ onStart }) {
               </article>
             );
           })}
+        </div>
+      </section>
+
+      <section className="intro-section partner-section reveal" id="partners">
+        <div className="section-kicker">
+          <Bot size={16} />
+          合伙人招募
+        </div>
+        <div className="partner-layout">
+          <div className="intro-section-head">
+            <h2>寻找 2-3 位合伙人，一起把原型推到真实产品。</h2>
+            <p>
+              当前项目已经形成清晰定位、官网雏形和创作工作台原型。下一步需要一起完成 MVP、真实 API 工作流、用户验证和商业化探索。
+            </p>
+          </div>
+          <div className="partner-panel">
+            {partnerNeeds.map((item, index) => (
+              <div className="partner-need" key={item}>
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <p>{item}</p>
+              </div>
+            ))}
+            <button className="primary-button partner-cta" onClick={onStart}>
+              先体验创作台
+              <ArrowRight size={18} />
+            </button>
+          </div>
         </div>
       </section>
 
@@ -505,7 +621,7 @@ function Workspace({ onShowIntro }) {
         <div className="header-actions">
           <button className="icon-text-button" onClick={onShowIntro}>
             <Sparkles size={16} />
-            产品介绍
+            团队官网
           </button>
           <button className="icon-button" title="新建项目">
             <Plus size={18} />
@@ -668,6 +784,7 @@ function Workspace({ onShowIntro }) {
               <small>{ratio} / {selectedDuration?.label}</small>
             </div>
             <div className="video-preview">
+              <img className="preview-image" src={visualAssets.neonCity} alt="" loading="lazy" />
               <div className="video-shine" />
               <button className="play-ring compact" title="播放预览">
                 <Play size={22} fill="currentColor" />
@@ -724,8 +841,14 @@ function Workspace({ onShowIntro }) {
           <small>每段最长 15 秒，共 {scenes.length} 段</small>
         </div>
         <div className="scene-list">
-          {scenes.map((scene) => (
+          {scenes.map((scene, index) => (
             <article className="scene-card" key={scene.id}>
+              <img
+                className="scene-card-image"
+                src={index % 2 === 0 ? visualAssets.storyboard : visualAssets.editingTimeline}
+                alt=""
+                loading="lazy"
+              />
               <div className="scene-index">{scene.number}</div>
               <div className="scene-main">
                 <div className="scene-title-row">
@@ -747,24 +870,36 @@ function Workspace({ onShowIntro }) {
 }
 
 export default function App() {
-  const [hasSeenIntro, setHasSeenIntro] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return window.localStorage.getItem(ONBOARDING_KEY) === 'true';
+  const [page, setPage] = useState(() => {
+    if (typeof window === 'undefined') return 'home';
+    return window.location.hash === CREATE_ROUTE ? 'create' : 'home';
   });
 
+  useEffect(() => {
+    const handleHashChange = () => {
+      setPage(window.location.hash === CREATE_ROUTE ? 'create' : 'home');
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    if (!window.location.hash) window.history.replaceState(null, '', HOME_ROUTE);
+
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
   function enterWorkspace() {
-    window.localStorage.setItem(ONBOARDING_KEY, 'true');
-    setHasSeenIntro(true);
+    window.location.hash = CREATE_ROUTE;
+    setPage('create');
     window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
   }
 
   function showIntroAgain() {
-    window.localStorage.removeItem(ONBOARDING_KEY);
-    setHasSeenIntro(false);
+    window.location.hash = HOME_ROUTE;
+    setPage('home');
     window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
   }
 
-  return hasSeenIntro ? (
+  return page === 'create' ? (
     <Workspace onShowIntro={showIntroAgain} />
   ) : (
     <IntroPage onStart={enterWorkspace} />
