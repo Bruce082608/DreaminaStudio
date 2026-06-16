@@ -1,615 +1,772 @@
-import { useState, useEffect, useRef } from 'react';
-import { Award, RotateCcw, Laptop, HardDrive, Cpu, Film } from 'lucide-react';
-import ScriptInput from './components/ScriptInput';
-import CharacterManager from './components/CharacterManager';
-import CookiePoolManager from './components/CookiePoolManager';
-import ShotTimeline from './components/ShotTimeline';
-import GlobalPreview from './components/GlobalPreview';
-import HistoryList from './components/HistoryList';
-import VideoTimelineEditor from './components/VideoTimelineEditor';
-import { parseScriptToStoryboard, generateFinalPrompt } from './utils/workflowHelpers';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  initialCharacters,
-  initialShots,
-  initialHistory,
-  mockVideoPool,
-  ENGINE_INFO
-} from './mockData';
+  AlertTriangle,
+  ArrowRight,
+  BadgeCheck,
+  Bot,
+  Check,
+  ChevronRight,
+  Clapperboard,
+  Clock3,
+  Download,
+  Film,
+  GalleryVerticalEnd,
+  ImagePlus,
+  Layers3,
+  Link2,
+  Loader2,
+  Lock,
+  Play,
+  Plus,
+  RefreshCw,
+  Route,
+  Scissors,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  TimerReset,
+  UploadCloud,
+  WandSparkles,
+  Workflow,
+  Zap,
+} from 'lucide-react';
+import './App.css';
 
-const defaultCookies = [
-  {
-    id: 'cookie-1',
-    alias: '主账号_VIP (即梦)',
-    value: 'sessionid_ss=vip_cookie_hash_01_a9f3b...',
-    status: 'active',
-    activeTasks: 0,
-    failCount: 0
-  },
-  {
-    id: 'cookie-2',
-    alias: '备用号_01 (即梦)',
-    value: 'sessionid_ss=free_cookie_hash_02_bc482...',
-    status: 'active',
-    activeTasks: 0,
-    failCount: 0
-  }
+const ONBOARDING_KEY = 'dreamina-studio-intro-seen';
+
+const durationOptions = [
+  { label: '30秒', value: 30, scenes: 3 },
+  { label: '1分钟', value: 60, scenes: 5 },
+  { label: '3分钟', value: 180, scenes: 12 },
+  { label: '5分钟', value: 300, scenes: 20 },
+  { label: '10分钟', value: 600, scenes: 40 },
 ];
 
-export default function App() {
-  // Global Workflow State
-  const [characters, setCharacters] = useState(initialCharacters);
-  const [shots, setShots] = useState(initialShots);
-  const [history, setHistory] = useState(initialHistory);
-  const [cookies, setCookies] = useState(defaultCookies);
+const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
+const ratioOptions = ['16:9', '9:16', '1:1'];
 
-  // Workflow Approval States
-  const [isApproved, setIsApproved] = useState(true); // Default loaded demo is pre-approved
-  const [targetDuration, setTargetDuration] = useState(60);
+const agentStages = [
+  '解析创意意图',
+  '生成长视频结构',
+  '拆分连续分镜',
+  '统一角色与场景',
+  '提交即梦任务',
+  '合成最终成片',
+];
 
-  // UI States
-  const [isSplitting, setIsSplitting] = useState(false);
-  const [isCompiling, setIsCompiling] = useState(false);
-  const [compileProgress, setCompileProgress] = useState(0);
-  const [compiledVideoUrl, setCompiledVideoUrl] = useState(null);
-  
-  // Toast notifications
-  const [toast, setToast] = useState(null);
+const sampleProjects = [
+  { title: '雨夜未来城预告片', time: '今天 13:20', duration: '3分钟', status: '已完成' },
+  { title: '新品手机发布短片', time: '昨天 21:08', duration: '1分钟', status: '已完成' },
+  { title: '森林咖啡馆开业片', time: '6月14日 10:31', duration: '30秒', status: '草稿' },
+];
 
-  // Keep track of active interval references to prevent leaks and race conditions
-  const activeIntervals = useRef({});
+const defaultIdea =
+  '一个未来城市里的少女在雨夜寻找失落的机器人伙伴，整体像电影预告片，情绪从孤独到希望。';
 
-  const showToast = (message, type = 'success') => {
-    setToast({ message, type });
-    const timeout = type === 'success' ? 3000 : 4500;
-    setTimeout(() => setToast(null), timeout);
-  };
+const introPainPoints = [
+  {
+    icon: TimerReset,
+    title: '时长被切碎',
+    text: '当创意延展到 3 到 10 分钟，用户不得不把完整叙事拆成几十个短片段，再逐段维持衔接。',
+  },
+  {
+    icon: AlertTriangle,
+    title: '语境难以承续',
+    text: '每次提交任务都像重新开始，角色、场景、情绪与镜头语言很难自然延续。',
+  },
+  {
+    icon: Scissors,
+    title: '执行成本外溢',
+    text: '分镜、提示词、参考图、重试、下载、拼接分散在不同环节，创作者的时间被流程消耗。',
+  },
+];
 
-  // Cleanup all intervals on component unmount
+const introAdvantages = [
+  {
+    icon: Workflow,
+    title: '从灵感到篇章',
+    text: '把粗略点子扩展成完整结构，再按 15 秒以内的生成边界拆成连续分镜。',
+  },
+  {
+    icon: Link2,
+    title: '镜头前后相承',
+    text: '自动维护角色、场景、光线、情绪和镜头语言，让每段画面都服务于同一条叙事线。',
+  },
+  {
+    icon: Bot,
+    title: '后台编排调度',
+    text: '专门 agent 负责调用即梦 API、排队、重试与合成，用户只关注进度与成片。',
+  },
+  {
+    icon: ShieldCheck,
+    title: '十分钟长片交付',
+    text: '面向故事短片、广告片、MV、课程预告、产品介绍等真正需要长内容的场景。',
+  },
+];
+
+const compareRows = [
+  ['长视频规划', '需要自己写剧本和分镜', '输入点子后自动生成结构和镜头'],
+  ['上下文连续', '每段任务之间容易断裂', '自动传递前后镜头关系和提示词'],
+  ['片段管理', '手动下载、命名、排序、拼接', '统一时间线查看状态与结果'],
+  ['创作门槛', '需要懂提示词、镜头和剪辑', '普通用户也能提交想法生成成片'],
+];
+
+const introFlow = [
+  { title: '落下灵感', text: '描述主题、情绪、人物与目标时长。' },
+  { title: '确立视觉', text: '补充人物、场景、产品或风格参考。' },
+  { title: '编排分镜', text: '生成连续镜头与每段即梦提示词。' },
+  { title: '交付成片', text: '自动汇总片段，输出完整视频。' },
+];
+
+function IntroPage({ onStart }) {
+  const [heroFade, setHeroFade] = useState(1);
+
   useEffect(() => {
+    const revealItems = document.querySelectorAll('.reveal');
+
+    if (!('IntersectionObserver' in window)) {
+      revealItems.forEach((item) => item.classList.add('is-visible'));
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) entry.target.classList.add('is-visible');
+        });
+      },
+      { threshold: 0.16 },
+    );
+
+    revealItems.forEach((item) => observer.observe(item));
+
+    const handleScroll = () => {
+      const nextFade = Math.max(0.38, 1 - window.scrollY / 680);
+      setHeroFade(nextFade);
+    };
+
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
+
     return () => {
-      Object.values(activeIntervals.current).forEach(clearInterval);
+      observer.disconnect();
+      window.removeEventListener('scroll', handleScroll);
     };
   }, []);
 
-  // Release Cookie Slot and update its health
-  function handleTaskEnd(engineKey, cookieId, success) {
-    if (engineKey === 'jimeng' && cookieId) {
-      setCookies(prev => prev.map(c => {
-        if (c.id === cookieId) {
-          const newFailCount = success ? 0 : c.failCount + 1;
-          const newStatus = newFailCount >= 3 ? 'expired' : c.status;
-          
-          if (newStatus === 'expired') {
-            setTimeout(() => {
-              showToast(`账号 [${c.alias}] 连续生成失败 3 次，已被下线保护！`, 'error');
-            }, 200);
-          }
-
-          return {
-            ...c,
-            activeTasks: Math.max(0, c.activeTasks - 1),
-            failCount: newFailCount,
-            status: newStatus
-          };
-        }
-        return c;
-      }));
-    }
-  }
-
-  // Execute Mock Generation
-  function runMockGeneration(shotId, engineKey, cookieId) {
-    const config = ENGINE_INFO[engineKey] || { name: '即梦-API', delay: 250, errorRate: 0.05 };
-    
-    if (activeIntervals.current[shotId]) {
-      clearInterval(activeIntervals.current[shotId]);
-    }
-
-    const targetShot = shots.find(s => s.id === shotId);
-    const finalPrompt = generateFinalPrompt(targetShot, characters);
-    
-    if (engineKey === 'jimeng' && cookieId) {
-      const assignedCookie = cookies.find(c => c.id === cookieId);
-      console.log(`[Router Gateway] Assigned Cookie: [${assignedCookie?.alias}] for Shot ${shotId}`);
-    }
-    console.log(`[Payload Router] Engine: ${config.name} | Prompt: "${finalPrompt}"`);
-
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 10) + 4;
-
-      if (progress >= 100) {
-        clearInterval(activeIntervals.current[shotId]);
-        delete activeIntervals.current[shotId];
-
-        // Determine Success / Failure
-        const isFailed = Math.random() < config.errorRate;
-
-        if (isFailed) {
-          let errorMsg = '接口响应超时 (Gateway Timeout)';
-          if (engineKey === 'hunyuan') errorMsg = 'CUDA Out of Memory: GPU VRAM (Allocated: 24GB)';
-          if (engineKey === 'kling') errorMsg = '可灵上游服务器排队溢出，请求被自动熔断';
-          if (engineKey === 'jimeng') errorMsg = '即梦API并发超限，请稍后重试';
-
-          setShots(prev => prev.map(s => s.id === shotId ? {
-            ...s,
-            status: 'failed',
-            progress: 0,
-            error: errorMsg
-          } : s));
-          showToast(`分镜渲染失败: ${errorMsg}`, 'error');
-          handleTaskEnd(engineKey, cookieId, false);
-        } else {
-          // Success
-          const randomVideo = mockVideoPool[Math.floor(Math.random() * mockVideoPool.length)];
-          
-          // Generate a preset mock caption based on the scene if empty
-          const defaultCaption = targetShot.prompt ? targetShot.prompt.split(',').pop().trim() : '转角时光咖啡馆...';
-
-          setShots(prev => prev.map(s => s.id === shotId ? {
-            ...s,
-            status: 'completed',
-            progress: 100,
-            videoUrl: randomVideo,
-            caption: s.caption || defaultCaption
-          } : s));
-          showToast(`分镜已完成渲染 (${config.name})`);
-          handleTaskEnd(engineKey, cookieId, true);
-        }
-      } else {
-        setShots(prev => prev.map(s => s.id === shotId ? { ...s, progress } : s));
-      }
-    }, config.delay);
-
-    activeIntervals.current[shotId] = interval;
-  }
-
-  // ==========================================
-  // Task Queue Scheduler with Cookie Allocation
-  // ==========================================
-  useEffect(() => {
-    // Only schedule if the user has approved the storyboard
-    if (!isApproved) return;
-
-    const generating = shots.filter(s => s.status === 'generating');
-    const waiting = shots.filter(s => s.status === 'waiting');
-
-    // Check if slots are available (concurrency < 2) and tasks are in queue
-    if (generating.length < 2 && waiting.length > 0) {
-      const slotsAvailable = 2 - generating.length;
-      const toStart = waiting.slice(0, slotsAvailable);
-
-      const shotsStarted = [];
-      const shotsFailedNoCookie = [];
-      let tempCookies = [...cookies];
-
-      toStart.forEach(shot => {
-        if (shot.engine === 'jimeng') {
-          const availableCookie = tempCookies.find(c => c.status === 'active' && c.activeTasks < 2);
-          if (availableCookie) {
-            availableCookie.activeTasks += 1;
-            shotsStarted.push({ shot, cookieId: availableCookie.id });
-          } else {
-            shotsFailedNoCookie.push(shot);
-          }
-        } else {
-          shotsStarted.push({ shot, cookieId: null });
-        }
-      });
-
-      // Update state for shots
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setShots(prev => prev.map(s => {
-        const started = shotsStarted.find(x => x.shot.id === s.id);
-        if (started) {
-          return { ...s, status: 'generating', progress: 0, error: null };
-        }
-        if (shotsFailedNoCookie.some(x => x.id === s.id)) {
-          return {
-            ...s,
-            status: 'failed',
-            error: '逆向网关异常：即梦 Cookie 账号池无空闲可用节点 (账号占满或已失效)',
-            progress: 0
-          };
-        }
-        return s;
-      }));
-
-      setCookies(tempCookies);
-
-      // Fire the asynchronous simulated generation tasks
-      shotsStarted.forEach(item => {
-        runMockGeneration(item.shot.id, item.shot.engine || 'jimeng', item.cookieId);
-      });
-
-      if (shotsFailedNoCookie.length > 0) {
-        showToast('部分即梦分镜启动失败：所有逆向 Cookie 账号均在忙碌或已失效', 'error');
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shots, cookies, isApproved]);
-
-  // ==========================================
-  // Cookie Pool Handlers
-  // ==========================================
-  const handleAddCookie = (newCookie) => {
-    setCookies(prev => [...prev, newCookie]);
-    showToast(`Cookie 账号 [${newCookie.alias}] 已载入账号池`);
-  };
-
-  const handleUpdateCookie = (id, updates) => {
-    setCookies(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
-  };
-
-  const handleDeleteCookie = (id) => {
-    const target = cookies.find(c => c.id === id);
-    setCookies(prev => prev.filter(c => c.id !== id));
-    showToast(`已删除账号 [${target?.alias || ''}]`);
-  };
-
-  const handleValidateCookie = (id, onDone) => {
-    setTimeout(() => {
-      setCookies(prev => prev.map(c => {
-        if (c.id === id) {
-          showToast(`账号 [${c.alias}] 握手成功，Cookie 状态健康！`);
-          return { ...c, status: 'active', failCount: 0 };
-        }
-        return c;
-      }));
-      onDone();
-    }, 1200);
-  };
-
-  // ==========================================
-  // Core Page Event Handlers
-  // ==========================================
-
-  // 1. Script selection & parsing logic
-  const handleSelectCandidateScript = (scriptText, duration) => {
-    setIsSplitting(true);
-    setTargetDuration(duration);
-
-    // Cancel any active running generators
-    Object.values(activeIntervals.current).forEach(clearInterval);
-    activeIntervals.current = {};
-    setCookies(prev => prev.map(c => ({ ...c, activeTasks: 0 })));
-
-    setTimeout(() => {
-      // Parse chosen script into storyboard with [5, 15]s constraints
-      const parsedShots = parseScriptToStoryboard(scriptText, characters, duration);
-
-      if (parsedShots && parsedShots.length > 0) {
-        setShots(parsedShots);
-        setIsApproved(false); // Move to unapproved draft stage for review
-        setCompiledVideoUrl(null);
-        showToast(`剧本分镜草稿提取完成，共计 ${parsedShots.length} 个镜头，已进入审核阶段。`);
-      } else {
-        showToast('提取失败，请重试', 'error');
-      }
-      setIsSplitting(false);
-    }, 1200);
-  };
-
-  // 2. Approve Storyboard
-  const handleApproveStoryboard = () => {
-    setIsApproved(true);
-    // Set all draft shots status to idle so they can be processed by the queue scheduler
-    setShots(prev => prev.map(s => ({ ...s, status: 'idle', progress: 0 })));
-    showToast('分镜脚本批准锁定！已解锁 AI 视频生成排队队列。');
-  };
-
-  // 3. Character management handlers
-  const handleAddCharacter = (newChar) => {
-    setCharacters(prev => [...prev, newChar]);
-    showToast(`角色 [${newChar.name}] 创建成功`);
-  };
-
-  const handleUpdateCharacter = (charId, updates) => {
-    setCharacters(prev => prev.map(c => c.id === charId ? { ...c, ...updates } : c));
-  };
-
-  const handleDeleteCharacter = (charId) => {
-    const char = characters.find(c => c.id === charId);
-    setCharacters(prev => prev.filter(c => c.id !== charId));
-    setShots(prev => prev.map(s => ({
-      ...s,
-      characterIds: s.characterIds.filter(id => id !== charId)
-    })));
-    showToast(`角色 [${char?.name || ''}] 已删除`);
-  };
-
-  // 4. Shot timeline handlers
-  const handleAddShot = () => {
-    const newShot = {
-      id: `shot-${Date.now()}`,
-      characterIds: [],
-      prompt: '',
-      duration: 8, // default in range [5, 15]
-      engine: 'jimeng',
-      status: 'idle',
-      progress: 0,
-      videoUrl: null,
-      caption: '',
-      error: null
-    };
-    setShots(prev => [...prev, newShot]);
-    showToast('已添加空分镜，可自行调整参数');
-  };
-
-  const handleUpdateShot = (shotId, updates) => {
-    setShots(prev => prev.map(s => s.id === shotId ? { ...s, ...updates } : s));
-  };
-
-  const handleDeleteShot = (shotId) => {
-    if (activeIntervals.current[shotId]) {
-      clearInterval(activeIntervals.current[shotId]);
-      delete activeIntervals.current[shotId];
-    }
-    setShots(prev => prev.filter(s => s.id !== shotId));
-    showToast('分镜已从时间轴移除');
-  };
-
-  const handleGenerateShot = (shotId) => {
-    setShots(prev => prev.map(s => s.id === shotId ? {
-      ...s,
-      status: 'waiting',
-      progress: 0,
-      videoUrl: null,
-      error: null
-    } : s));
-    showToast('已加入渲染队列，排队调度中...');
-  };
-
-  const handleGenerateAll = () => {
-    const idleOrFailedCount = shots.filter(s => s.status === 'idle' || s.status === 'failed').length;
-    
-    if (idleOrFailedCount === 0) {
-      showToast('没有需要生成的分镜（镜头已在排队或渲染完成）', 'warning');
-      return;
-    }
-
-    setShots(prev => prev.map(s => {
-      if (s.status === 'idle' || s.status === 'failed') {
-        return { ...s, status: 'waiting', progress: 0, error: null, videoUrl: null };
-      }
-      return s;
-    }));
-    showToast(`一键排队：已将 ${idleOrFailedCount} 个分镜推入渲染队列中`);
-  };
-
-  const handleReorderShots = (newShots) => {
-    setShots(newShots);
-  };
-
-  // 5. Global compilation logic from timeline editor
-  const handleCompileFinalVideo = (mixingParams) => {
-    const completedShots = shots.filter(s => s.status === 'completed');
-    if (completedShots.length === 0) {
-      showToast('必须有至少一个已生成视频的分镜镜头才能进行压制剪辑', 'error');
-      return;
-    }
-
-    setIsCompiling(true);
-    setCompileProgress(0);
-
-    const hasParams = mixingParams && typeof mixingParams === 'object' && 'bgm' in mixingParams;
-    const bgmKey = hasParams ? mixingParams.bgm : 'lofi';
-    const bgmVol = hasParams ? mixingParams.bgmVolume : 30;
-    const voiceVol = hasParams ? mixingParams.voiceVolume : 80;
-    const duration = hasParams ? mixingParams.totalDuration : shots.reduce((acc, curr) => acc + (curr.duration || 0), 0);
-
-    let progress = 0;
-    const timer = setInterval(() => {
-      progress += Math.floor(Math.random() * 8) + 3;
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(timer);
-
-        const finalVideo = completedShots[0].videoUrl || mockVideoPool[0];
-        setCompiledVideoUrl(finalVideo);
-        setIsCompiling(false);
-
-        // Add to history list
-        const newHistoryItem = {
-          id: `hist-${Date.now()}`,
-          title: `剪辑出品 - BGM:${bgmKey === 'lofi' ? 'Lofi' : bgmKey === 'epic' ? '交响' : '吉他'} (#${history.length + 1})`,
-          date: new Date().toISOString().replace('T', ' ').substring(0, 16),
-          duration: duration,
-          videoUrl: finalVideo
-        };
-        setHistory(prev => [newHistoryItem, ...prev]);
-        showToast(`压制成功！BGM音量:${bgmVol}%, 台词音量:${voiceVol}%`);
-      } else {
-        setCompileProgress(progress);
-      }
-    }, 180);
-  };
-
-  // History Selection & Deletion Handlers
-  const handleSelectHistory = (item) => {
-    setCompiledVideoUrl(item.videoUrl);
-    showToast(`已载入历史成片: ${item.title}`);
-  };
-
-  const handleDeleteHistory = (id) => {
-    setHistory(prev => prev.filter(h => h.id !== id));
-    showToast('历史记录已删除');
-  };
-
-  // Load Presets / Revert to Demo state
-  const handleLoadDemo = () => {
-    if (window.confirm('确定要重置所有工作区状态并恢复Demo样例数据吗？这会清空当前队列和Cookie池。')) {
-      Object.values(activeIntervals.current).forEach(clearInterval);
-      activeIntervals.current = {};
-
-      setCharacters(initialCharacters);
-      setShots(initialShots);
-      setIsApproved(true); // Demo is pre-approved
-      setTargetDuration(60);
-      setCompiledVideoUrl(null);
-      setCookies(defaultCookies);
-      showToast('工作区已恢复默认Demo配置');
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-stone-50 text-stone-800 flex flex-col antialiased selection:bg-amber-100 selection:text-amber-900">
-      
-      {/* Toast Notifications */}
-      {toast && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 animate-slide-up">
-          <div className={`px-4 py-3 rounded-xl border shadow-lg flex items-center gap-2.5 text-xs font-semibold ${
-            toast.type === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800 animate-pulse' :
-            toast.type === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-800' :
-            'bg-emerald-50 border-emerald-200 text-emerald-800'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${
-              toast.type === 'error' ? 'bg-rose-500' :
-              toast.type === 'warning' ? 'bg-amber-500' :
-              'bg-emerald-500'
-            }`} />
-            <span>{toast.message}</span>
+    <main className="intro-shell">
+      <div className="flow-field" aria-hidden="true">
+        <span className="flow-line flow-line-a" />
+        <span className="flow-line flow-line-b" />
+        <span className="flow-line flow-line-c" />
+        <span className="scan-grid" />
+      </div>
+
+      <nav className="intro-nav">
+        <div className="brand-mark">
+          <Film size={20} />
+          <span>Dreamina Studio</span>
+        </div>
+        <button className="ghost-button" onClick={onStart}>
+          进入工作台
+          <ChevronRight size={16} />
+        </button>
+      </nav>
+
+      <section className="intro-hero">
+        <div
+          className="intro-copy"
+          style={{ '--hero-copy-opacity': heroFade, '--hero-copy-y': `${(1 - heroFade) * -30}px` }}
+        >
+          <div className="eyebrow">
+            <Sparkles size={14} />
+            即梦长视频创作中枢
+          </div>
+          <h1>
+            <span>一念成片</span>
+            <span>十分钟长片</span>
+            <span>自成篇章</span>
+          </h1>
+          <p>
+            以即梦为生成引擎，以专属 agent 负责长片编排。你只需给出创意与参考图，系统会规划连续分镜、承接上下文，并合成最长 10 分钟的视频作品。
+          </p>
+          <div className="hero-actions">
+            <button className="primary-button" onClick={onStart}>
+              开始创作
+              <ArrowRight size={18} />
+            </button>
+            <div className="hero-proof">
+              <BadgeCheck size={16} />
+              <span>把 15 秒生成边界延展为完整叙事</span>
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Main Navigation Header */}
-      <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-stone-200/50 px-6 py-4">
-        <div className="w-full flex items-center justify-between gap-4">
-          {/* Logo & Info */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-amber-600 rounded-xl flex items-center justify-center text-white shadow-sm shadow-amber-600/20">
-              <Film size={20} className="animate-pulse" />
+        <div className="hero-console" aria-label="产品流程预览">
+          <div className="console-topbar">
+            <span />
+            <span />
+            <span />
+            <strong>长片编排台</strong>
+          </div>
+          <div className="console-video">
+            <div className="play-ring">
+              <Play size={28} fill="currentColor" />
             </div>
-            <div>
-              <h1 className="text-base font-bold tracking-tight text-stone-900 flex items-center gap-1.5">
-                梦之镜DreaminaStudio
-                <span className="text-[10px] font-medium px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full">v1.5 Studio</span>
-              </h1>
-              <p className="text-xs text-stone-400">创意想法提案到内置剪辑轨道压制输出</p>
+            <div className="long-video-badge">
+              <Zap size={14} />
+              10 分钟长片编排
+            </div>
+            <div className="timeline-ruler">
+              {Array.from({ length: 12 }).map((_, index) => (
+                <span key={index} style={{ '--delay': `${index * 0.09}s` }} />
+              ))}
             </div>
           </div>
-
-          {/* Hardware & API Status Panel */}
-          <div className="hidden md:flex items-center gap-6 text-[11px] text-stone-500 bg-stone-50 border border-stone-200/60 rounded-xl px-4 py-2">
-            <div className="flex items-center gap-1.5">
-              <HardDrive size={13} className="text-emerald-500" />
-              <span>存储: <b className="font-semibold text-stone-700">84.2 GB 空闲</b></span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Cpu size={13} className="text-amber-500" />
-              <span>并发调度: <b className="font-semibold text-stone-700">2进程限制</b></span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Laptop size={13} className="text-sky-500" />
-              <span>后期剪辑器: <b className="font-semibold text-stone-700">FFmpeg内核就绪</b></span>
-            </div>
+          <div className="console-steps">
+            {['创意解析', '分镜规划', '即梦生成', '合成输出'].map((item, index) => (
+              <div className="console-step" key={item}>
+                <span className={index < 3 ? 'active' : ''}>{index < 3 ? <Check size={13} /> : index + 1}</span>
+                <p>{item}</p>
+              </div>
+            ))}
           </div>
+        </div>
+      </section>
 
-          {/* Action Header Button */}
-          <button
-            onClick={handleLoadDemo}
-            className="flex items-center gap-1.5 py-2 px-3 hover:bg-stone-100 text-stone-600 rounded-xl text-xs font-semibold border border-stone-200 transition-all active:scale-[0.97]"
-            title="恢复所有Demo配置"
-          >
-            <RotateCcw size={12} />
-            <span className="hidden sm:inline">恢复系统预设</span>
+      <section className="intro-metrics">
+        <div>
+          <strong>10分钟</strong>
+          <span>从片段走向完整长片</span>
+        </div>
+        <div>
+          <strong>40段</strong>
+          <span>连续分镜自动编排</span>
+        </div>
+        <div>
+          <strong>Agent</strong>
+          <span>承接上下文与任务调度</span>
+        </div>
+      </section>
+
+      <section className="intro-section pain-section reveal">
+        <div className="section-kicker">
+          <AlertTriangle size={16} />
+          长片创作的断点
+        </div>
+        <div className="intro-section-head">
+          <h2>强大的模型，仍缺一条长片叙事链。</h2>
+          <p>用户真正需要的是完整作品，而不是一组等待手动拼接的短素材。</p>
+        </div>
+        <div className="pain-grid">
+          {introPainPoints.map((item, index) => {
+            const Icon = item.icon;
+            return (
+              <article className={`motion-card pain-card pain-card-${index + 1}`} key={item.title}>
+                <Icon size={22} />
+                <h3>{item.title}</h3>
+                <p>{item.text}</p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="intro-section value-section reveal">
+        <div className="section-kicker">
+          <Route size={16} />
+          长片生产线
+        </div>
+        <div className="intro-section-head">
+          <h2>不是替代即梦，而是让即梦进入长片创作秩序。</h2>
+          <p>
+            Dreamina Studio 负责创意扩写、分镜拆解、上下文传递、任务调度与最终合成，让短片生成能力具备长片交付的工作流。
+          </p>
+        </div>
+        <div className="value-grid">
+          {introAdvantages.map((item, index) => {
+            const Icon = item.icon;
+            return (
+              <article className={`motion-card value-card value-card-${index + 1}`} key={item.title}>
+                <div className="card-icon">
+                  <Icon size={21} />
+                </div>
+                <h3>{item.title}</h3>
+                <p>{item.text}</p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="intro-section compare-section reveal">
+        <div className="section-kicker">
+          <BadgeCheck size={16} />
+          官网之外的长片能力
+        </div>
+        <div className="compare-layout">
+          <div className="intro-section-head">
+            <h2>即梦官网擅长片段生成，Dreamina Studio 面向成片交付。</h2>
+            <p>
+              当目标从 15 秒片段变成 3 到 10 分钟作品，难点不再只是生成，而是剧本结构、连续性、重试与剪辑管理。
+            </p>
+          </div>
+          <div className="compare-table">
+            <div className="compare-header">
+              <span>能力</span>
+              <span>即梦官网</span>
+              <span>Dreamina Studio</span>
+            </div>
+            {compareRows.map(([feature, official, studio]) => (
+              <div className="compare-row" key={feature}>
+                <strong>{feature}</strong>
+                <p>{official}</p>
+                <p>{studio}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="intro-section flow-section reveal">
+        <div className="section-kicker">
+          <Workflow size={16} />
+          创作路径
+        </div>
+        <div className="intro-section-head centered">
+          <h2>保留人的审美判断，把繁琐执行交给系统。</h2>
+          <p>从灵感到成片保持清晰链路，适合普通创作者，也适合需要稳定产出视频内容的团队。</p>
+        </div>
+        <div className="flow-steps">
+          {introFlow.map((step, index) => (
+            <article className={`flow-step flow-step-${index + 1}`} key={step.title}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <h3>{step.title}</h3>
+              <p>{step.text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="intro-final-cta reveal">
+        <h2>让灵感越过 15 秒，抵达完整作品。</h2>
+        <p>从下一次创作开始，让用户提交的是想法，收到的是一条结构完整的长视频。</p>
+        <button className="primary-button" onClick={onStart}>
+          开始创作
+          <ArrowRight size={18} />
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function StatusPill({ status }) {
+  const statusMap = {
+    done: '已完成',
+    active: '生成中',
+    queued: '等待中',
+    locked: '待提交',
+  };
+
+  return <span className={`status-pill ${status}`}>{statusMap[status]}</span>;
+}
+
+function createScenes(duration, idea, style) {
+  const count = Math.min(Math.ceil(duration / 15), 40);
+  const titles = [
+    '开场氛围建立',
+    '主角动机显现',
+    '关键线索出现',
+    '空间关系推进',
+    '情绪转折',
+    '动作段落展开',
+    '冲突升级',
+    '视觉高潮',
+    '尾声与回响',
+  ];
+
+  return Array.from({ length: count }).map((_, index) => {
+    const start = index * 15;
+    const end = Math.min(start + 15, duration);
+    const status = index < 2 ? 'done' : index === 2 ? 'active' : 'queued';
+
+    return {
+      id: `scene-${index + 1}`,
+      number: String(index + 1).padStart(2, '0'),
+      time: `${formatTime(start)} - ${formatTime(end)}`,
+      title: titles[index % titles.length],
+      status,
+      progress: status === 'done' ? 100 : status === 'active' ? 64 : 0,
+      prompt: `${style}，延续同一角色、场景光线和镜头语言：${idea}`,
+    };
+  });
+}
+
+function formatTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function Workspace({ onShowIntro }) {
+  const timers = useRef([]);
+  const [idea, setIdea] = useState(defaultIdea);
+  const [duration, setDuration] = useState(180);
+  const [style, setStyle] = useState('电影感');
+  const [ratio, setRatio] = useState('16:9');
+  const [images, setImages] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [stageIndex, setStageIndex] = useState(0);
+  const [progress, setProgress] = useState(38);
+  const [scenes, setScenes] = useState(() => createScenes(180, defaultIdea, '电影感'));
+
+  const selectedDuration = useMemo(
+    () => durationOptions.find((item) => item.value === duration),
+    [duration],
+  );
+
+  const completeCount = scenes.filter((scene) => scene.status === 'done').length;
+
+  useEffect(() => {
+    return () => timers.current.forEach((timer) => clearInterval(timer));
+  }, []);
+
+  function handleImageUpload(event) {
+    const files = Array.from(event.target.files || []);
+    const nextImages = files.slice(0, 6).map((file) => ({
+      id: `${file.name}-${file.lastModified}`,
+      name: file.name,
+      url: URL.createObjectURL(file),
+    }));
+    setImages((current) => [...current, ...nextImages].slice(0, 6));
+  }
+
+  function handleSubmit() {
+    timers.current.forEach((timer) => clearInterval(timer));
+    timers.current = [];
+
+    const nextScenes = createScenes(duration, idea, style).map((scene, index) => ({
+      ...scene,
+      status: index === 0 ? 'active' : 'queued',
+      progress: index === 0 ? 12 : 0,
+    }));
+
+    setScenes(nextScenes);
+    setIsGenerating(true);
+    setStageIndex(0);
+    setProgress(6);
+
+    const stageTimer = setInterval(() => {
+      setStageIndex((current) => Math.min(current + 1, agentStages.length - 1));
+      setProgress((current) => Math.min(current + 15, 96));
+    }, 1400);
+
+    const sceneTimer = setInterval(() => {
+      setScenes((currentScenes) => {
+        const activeIndex = currentScenes.findIndex((scene) => scene.status === 'active');
+
+        if (activeIndex === -1) {
+          clearInterval(sceneTimer);
+          clearInterval(stageTimer);
+          setProgress(100);
+          setStageIndex(agentStages.length - 1);
+          setIsGenerating(false);
+          return currentScenes;
+        }
+
+        const activeScene = currentScenes[activeIndex];
+        if (activeScene.progress >= 100) {
+          return currentScenes.map((scene, index) => {
+            if (index === activeIndex) return { ...scene, status: 'done', progress: 100 };
+            if (index === activeIndex + 1) return { ...scene, status: 'active', progress: 8 };
+            return scene;
+          });
+        }
+
+        return currentScenes.map((scene, index) =>
+          index === activeIndex
+            ? { ...scene, progress: Math.min(scene.progress + 23, 100) }
+            : scene,
+        );
+      });
+    }, 900);
+
+    timers.current = [stageTimer, sceneTimer];
+  }
+
+  return (
+    <div className="workspace-shell">
+      <header className="app-header">
+        <div className="brand-mark">
+          <Film size={20} />
+          <span>Dreamina Studio</span>
+        </div>
+        <div className="header-actions">
+          <button className="icon-text-button" onClick={onShowIntro}>
+            <Sparkles size={16} />
+            产品介绍
+          </button>
+          <button className="icon-button" title="新建项目">
+            <Plus size={18} />
+          </button>
+          <button className="icon-button" title="设置">
+            <Settings2 size={18} />
           </button>
         </div>
       </header>
 
-      {/* Main Page Layout (Three-Column Responsive Grid) */}
-      <main className="flex-1 w-full p-4 md:p-6 flex flex-col gap-6">
-        
-        {/* Top Workspace (3-Column Layout) */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          {/* Left Column (25% Width): Script, Characters, and Cookie Pool */}
-          <div className="md:col-span-1 flex flex-col gap-6">
-            <div className="min-h-[360px]">
-              <ScriptInput
-                onSplitScript={handleSelectCandidateScript}
-                isSplitting={isSplitting}
-              />
-            </div>
-            <div>
-              <CharacterManager
-                characters={characters}
-                onAddCharacter={handleAddCharacter}
-                onUpdateCharacter={handleUpdateCharacter}
-                onDeleteCharacter={handleDeleteCharacter}
-              />
-            </div>
-            <div>
-              <CookiePoolManager
-                cookies={cookies}
-                onAddCookie={handleAddCookie}
-                onUpdateCookie={handleUpdateCookie}
-                onDeleteCookie={handleDeleteCookie}
-                onValidateCookie={handleValidateCookie}
-              />
-            </div>
+      <main className="workspace-grid">
+        <aside className="history-rail">
+          <div className="rail-section">
+            <p className="rail-label">项目</p>
+            <button className="rail-primary">
+              <WandSparkles size={16} />
+              新创作
+            </button>
           </div>
 
-          {/* Middle Column (50% Width): Shot Timeline Control */}
-          <div className="md:col-span-2">
-            <ShotTimeline
-              shots={shots}
-              characters={characters}
-              onUpdateShot={handleUpdateShot}
-              onDeleteShot={handleDeleteShot}
-              onAddShot={handleAddShot}
-              onGenerateShot={handleGenerateShot}
-              onGenerateAll={handleGenerateAll}
-              isApproved={isApproved}
-              onApproveStoryboard={handleApproveStoryboard}
+          <div className="rail-section">
+            <p className="rail-label">历史</p>
+            <div className="project-list">
+              {sampleProjects.map((project) => (
+                <button className="project-item" key={project.title}>
+                  <span>
+                    <strong>{project.title}</strong>
+                    <small>{project.time} / {project.duration}</small>
+                  </span>
+                  <em>{project.status}</em>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        <section className="creation-panel">
+          <div className="section-heading">
+            <span>
+              <Clapperboard size={18} />
+              创作台
+            </span>
+            <small>Agent Endpoint: Ready</small>
+          </div>
+
+          <label className="idea-composer">
+            <span>视频想法</span>
+            <textarea
+              value={idea}
+              onChange={(event) => setIdea(event.target.value)}
+              placeholder="描述你想制作的视频，可以很粗略。"
             />
+          </label>
+
+          <div className="upload-strip">
+            <label className="upload-drop">
+              <input type="file" accept="image/*" multiple onChange={handleImageUpload} />
+              <UploadCloud size={20} />
+              <span>上传参考图片</span>
+            </label>
+            <div className="image-preview-row">
+              {images.length === 0 ? (
+                <div className="empty-image-slot">
+                  <ImagePlus size={19} />
+                  <span>人物 / 场景 / 风格</span>
+                </div>
+              ) : (
+                images.map((image) => (
+                  <img src={image.url} alt={image.name} key={image.id} />
+                ))
+              )}
+            </div>
           </div>
 
-          {/* Right Column (25% Width): Global Preview & Export & History */}
-          <div className="md:col-span-1 flex flex-col gap-6">
+          <div className="control-group">
+            <div className="control-head">
+              <Clock3 size={16} />
+              <span>目标时长</span>
+            </div>
+            <div className="segmented-control duration-control">
+              {durationOptions.map((option) => (
+                <button
+                  className={duration === option.value ? 'selected' : ''}
+                  key={option.value}
+                  onClick={() => setDuration(option.value)}
+                >
+                  <strong>{option.label}</strong>
+                  <small>{option.scenes}段</small>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="control-split">
+            <div className="control-group">
+              <div className="control-head">
+                <GalleryVerticalEnd size={16} />
+                <span>视觉风格</span>
+              </div>
+              <div className="segmented-control wrap">
+                {styleOptions.map((option) => (
+                  <button
+                    className={style === option ? 'selected' : ''}
+                    key={option}
+                    onClick={() => setStyle(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="control-group">
+              <div className="control-head">
+                <Layers3 size={16} />
+                <span>画幅</span>
+              </div>
+              <div className="segmented-control wrap">
+                {ratioOptions.map((option) => (
+                  <button
+                    className={ratio === option ? 'selected' : ''}
+                    key={option}
+                    onClick={() => setRatio(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="advanced-row">
             <div>
-              <GlobalPreview
-                shots={shots}
-                isCompiling={isCompiling}
-                compileProgress={compileProgress}
-                compiledVideoUrl={compiledVideoUrl}
-                onCompile={handleCompileFinalVideo}
-              />
+              <Lock size={15} />
+              <span>角色一致性强</span>
             </div>
             <div>
-              <HistoryList
-                history={history}
-                activeVideoUrl={compiledVideoUrl}
-                onSelectHistory={handleSelectHistory}
-                onDeleteHistory={handleDeleteHistory}
-              />
+              <RefreshCw size={15} />
+              <span>自动转场</span>
+            </div>
+            <div>
+              <Bot size={15} />
+              <span>Agent 规划</span>
             </div>
           </div>
-        </div>
 
-        {/* Bottom Workspace: Built-in Video Timeline Editor */}
-        {isApproved && shots.length > 0 && (
-          <div className="w-full">
-            <VideoTimelineEditor
-              shots={shots}
-              onUpdateShot={handleUpdateShot}
-              onReorderShots={handleReorderShots}
-              onCompileFinalVideo={handleCompileFinalVideo}
-              isCompiling={isCompiling}
-              targetDuration={targetDuration}
-            />
+          <button className="submit-button" onClick={handleSubmit} disabled={!idea.trim()}>
+            {isGenerating ? <Loader2 className="spin" size={18} /> : <WandSparkles size={18} />}
+            {isGenerating ? '生成中' : '开始生成'}
+          </button>
+        </section>
+
+        <section className="director-panel">
+          <div className="preview-panel">
+            <div className="section-heading">
+              <span>
+                <Play size={18} />
+                成片预览
+              </span>
+              <small>{ratio} / {selectedDuration?.label}</small>
+            </div>
+            <div className="video-preview">
+              <div className="video-shine" />
+              <button className="play-ring compact" title="播放预览">
+                <Play size={22} fill="currentColor" />
+              </button>
+              <div className="preview-caption">
+                <strong>{isGenerating ? '片段生成中' : '等待最新任务'}</strong>
+                <span>{completeCount}/{scenes.length} 段完成</span>
+              </div>
+            </div>
+            <div className="export-row">
+              <button>
+                <Download size={16} />
+                下载 MP4
+              </button>
+              <button>
+                <Clapperboard size={16} />
+                分镜脚本
+              </button>
+            </div>
           </div>
-        )}
 
+          <div className="progress-panel">
+            <div className="section-heading">
+              <span>
+                <Bot size={18} />
+                后台进度
+              </span>
+              <small>{progress}%</small>
+            </div>
+            <div className="progress-track">
+              <span style={{ width: `${progress}%` }} />
+            </div>
+            <div className="stage-list">
+              {agentStages.map((stage, index) => (
+                <div
+                  className={`stage-item ${index < stageIndex ? 'done' : ''} ${index === stageIndex ? 'active' : ''}`}
+                  key={stage}
+                >
+                  <span>{index < stageIndex ? <Check size={12} /> : index + 1}</span>
+                  <p>{stage}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-stone-200/50 bg-white py-4 px-6 text-center text-[10px] text-stone-400">
-        <p className="w-full flex items-center justify-between">
-          <span>© 2026 DreaminaStudio. AI 导演协同创作平台.</span>
-          <span className="flex items-center gap-1"><Award size={10} /> 任务队列调度与多引擎路由控制中心</span>
-        </p>
-      </footer>
+      <section className="timeline-panel">
+        <div className="section-heading">
+          <span>
+            <Film size={18} />
+            分镜时间线
+          </span>
+          <small>每段最长 15 秒，共 {scenes.length} 段</small>
+        </div>
+        <div className="scene-list">
+          {scenes.map((scene) => (
+            <article className="scene-card" key={scene.id}>
+              <div className="scene-index">{scene.number}</div>
+              <div className="scene-main">
+                <div className="scene-title-row">
+                  <strong>{scene.title}</strong>
+                  <StatusPill status={scene.status} />
+                </div>
+                <p>{scene.prompt}</p>
+                <div className="mini-progress">
+                  <span style={{ width: `${scene.progress}%` }} />
+                </div>
+              </div>
+              <div className="scene-time">{scene.time}</div>
+            </article>
+          ))}
+        </div>
+      </section>
     </div>
+  );
+}
+
+export default function App() {
+  const [hasSeenIntro, setHasSeenIntro] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(ONBOARDING_KEY) === 'true';
+  });
+
+  function enterWorkspace() {
+    window.localStorage.setItem(ONBOARDING_KEY, 'true');
+    setHasSeenIntro(true);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+  }
+
+  function showIntroAgain() {
+    window.localStorage.removeItem(ONBOARDING_KEY);
+    setHasSeenIntro(false);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+  }
+
+  return hasSeenIntro ? (
+    <Workspace onShowIntro={showIntroAgain} />
+  ) : (
+    <IntroPage onStart={enterWorkspace} />
   );
 }
