@@ -3,7 +3,9 @@ import {
   AlertTriangle,
   ArrowRight,
   BadgeCheck,
+  BarChart3,
   Bot,
+  CalendarClock,
   Check,
   ChevronRight,
   Clapperboard,
@@ -16,16 +18,23 @@ import {
   Link2,
   Loader2,
   Lock,
+  LogIn,
+  LogOut,
+  Mail,
   Play,
   Plus,
   RefreshCw,
   Route,
   Scissors,
   Settings2,
+  Shield,
   ShieldCheck,
   Sparkles,
   TimerReset,
   UploadCloud,
+  User,
+  UserPlus,
+  Users,
   WandSparkles,
   Workflow,
   Zap,
@@ -34,7 +43,39 @@ import './App.css';
 
 const HOME_ROUTE = '#/';
 const CREATE_ROUTE = '#/create';
+const LOGIN_ROUTE = '#/login';
+const REGISTER_ROUTE = '#/register';
+const ADMIN_ROUTE = '#/admin';
+const AUTH_STORAGE_KEY = 'dreamina_studio_auth';
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+
+function getPageFromHash() {
+  if (typeof window === 'undefined') return 'home';
+
+  const routeMap = {
+    [CREATE_ROUTE]: 'create',
+    [LOGIN_ROUTE]: 'login',
+    [REGISTER_ROUTE]: 'register',
+    [ADMIN_ROUTE]: 'admin',
+  };
+
+  return routeMap[window.location.hash] || 'home';
+}
+
+function goTo(route) {
+  window.location.hash = route;
+  window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+}
+
+function readStoredAuth() {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    return JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
 
 const durationOptions = [
   { label: '30秒', value: 30, scenes: 3 },
@@ -93,14 +134,6 @@ const agentStages = [
   '提交即梦任务',
   '合成最终成片',
 ];
-
-const backendStatusToUiStatus = {
-  idle: 'locked',
-  waiting: 'queued',
-  generating: 'active',
-  completed: 'done',
-  failed: 'failed',
-};
 
 const sampleProjects = [
   { title: '雨夜未来城预告片', time: '今天 13:20', duration: '3分钟', status: '已完成' },
@@ -519,12 +552,19 @@ function StatusPill({ status }) {
 }
 
 async function apiRequest(path, options = {}) {
+  const { authToken, ...fetchOptions } = options;
+  const headers = {
+    'Content-Type': 'application/json',
+    ...fetchOptions.headers,
+  };
+
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-    ...options,
+    ...fetchOptions,
+    headers,
   });
 
   if (!response.ok) {
@@ -532,7 +572,672 @@ async function apiRequest(path, options = {}) {
     throw new Error(errorBody?.detail || `API request failed: ${response.status}`);
   }
 
+  if (response.status === 204) return null;
   return response.json();
+}
+
+function formatDate(timestamp) {
+  if (!timestamp) return '尚未登录';
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp * 1000));
+}
+
+function AuthPage({ mode, onAuthSuccess, onSwitchMode, onShowHome }) {
+  const isRegister = mode === 'register';
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setError('');
+
+    try {
+      const payload = isRegister ? { name, email, password } : { email, password };
+      const result = await apiRequest(isRegister ? '/auth/register' : '/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      onAuthSuccess(result);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <div className="flow-field" aria-hidden="true">
+        <span className="flow-line flow-line-a" />
+        <span className="scan-grid" />
+      </div>
+
+      <nav className="intro-nav auth-nav">
+        <button className="brand-mark brand-button" onClick={onShowHome}>
+          <Film size={20} />
+          <span>Dreamina Studio</span>
+        </button>
+        <button className="ghost-button" onClick={onSwitchMode}>
+          {isRegister ? <LogIn size={16} /> : <UserPlus size={16} />}
+          {isRegister ? '已有账号，去登录' : '注册新账号'}
+        </button>
+      </nav>
+
+      <section className="auth-layout">
+        <div className="auth-copy">
+          <div className="eyebrow">
+            <ShieldCheck size={14} />
+            创作身份系统
+          </div>
+          <h1>{isRegister ? '加入 Dreamina Studio 创作台' : '欢迎回到创作中枢'}</h1>
+          <p>
+            登录后即可进入 AI 长视频创作台。管理员账号还可以进入后台，查看用户增长、活跃情况和注册名单。
+          </p>
+          <div className="auth-proof-grid">
+            <div>
+              <Users size={18} />
+              <span>用户注册沉淀</span>
+            </div>
+            <div>
+              <BarChart3 size={18} />
+              <span>后台数据总览</span>
+            </div>
+            <div>
+              <Lock size={18} />
+              <span>密码哈希存储</span>
+            </div>
+          </div>
+        </div>
+
+        <form className="auth-card" onSubmit={handleSubmit}>
+          <div className="auth-card-head">
+            <span>{isRegister ? <UserPlus size={20} /> : <LogIn size={20} />}</span>
+            <div>
+              <h2>{isRegister ? '创建账号' : '登录账号'}</h2>
+              <p>{isRegister ? '用于保存后续创作记录与权益' : '进入创作台或管理员后台'}</p>
+            </div>
+          </div>
+
+          {isRegister ? (
+            <label className="auth-field">
+              <span>姓名 / 昵称</span>
+              <div>
+                <User size={17} />
+                <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：Bruce" />
+              </div>
+            </label>
+          ) : null}
+
+          <label className="auth-field">
+            <span>邮箱</span>
+            <div>
+              <Mail size={17} />
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+              />
+            </div>
+          </label>
+
+          <label className="auth-field">
+            <span>密码</span>
+            <div>
+              <Lock size={17} />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="至少 8 位"
+              />
+            </div>
+          </label>
+
+          {error ? (
+            <div className="api-error">
+              <AlertTriangle size={15} />
+              <span>{error}</span>
+            </div>
+          ) : null}
+
+          <button className="submit-button" disabled={isSubmitting || !email.trim() || !password.trim()}>
+            {isSubmitting ? <Loader2 className="spin" size={18} /> : isRegister ? <UserPlus size={18} /> : <LogIn size={18} />}
+            {isSubmitting ? '处理中...' : isRegister ? '注册并进入创作台' : '登录'}
+          </button>
+
+          <button className="auth-switch" type="button" onClick={onSwitchMode}>
+            {isRegister ? '已有账号？立即登录' : '还没有账号？现在注册'}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
+  const [activeAdminView, setActiveAdminView] = useState('overview');
+  const [users, setUsers] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [agentConfig, setAgentConfig] = useState(null);
+  const [agentStatus, setAgentStatus] = useState(null);
+  const [agentForm, setAgentForm] = useState({
+    deepseekBaseUrl: 'https://api.deepseek.com',
+    deepseekModel: 'deepseek-v4-flash',
+    deepseekApiKey: '',
+    jimengMode: 'mock',
+    jimengApiUrl: '',
+  });
+  const [agentMessage, setAgentMessage] = useState('');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadAdminData() {
+      try {
+        const [nextStats, nextUsers, nextConfig, nextAgentStatus] = await Promise.all([
+          apiRequest('/admin/stats', { authToken: auth?.token }),
+          apiRequest('/admin/users', { authToken: auth?.token }),
+          apiRequest('/admin/agent/config', { authToken: auth?.token }),
+          apiRequest('/admin/agent/status', { authToken: auth?.token }),
+        ]);
+
+        if (isMounted) {
+          setStats(nextStats);
+          setUsers(nextUsers);
+          setAgentConfig(nextConfig);
+          setAgentStatus(nextAgentStatus);
+          setAgentForm({
+            deepseekBaseUrl: nextConfig.deepseekBaseUrl,
+            deepseekModel: nextConfig.deepseekModel,
+            deepseekApiKey: '',
+            jimengMode: nextConfig.jimengMode,
+            jimengApiUrl: nextConfig.jimengApiUrl || '',
+          });
+          setError('');
+        }
+      } catch (requestError) {
+        if (isMounted) setError(requestError.message);
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+
+    loadAdminData();
+    return () => {
+      isMounted = false;
+    };
+  }, [auth?.token]);
+
+  async function handleAgentConfigSubmit(event) {
+    event.preventDefault();
+    setAgentMessage('正在保存 Agent 配置...');
+    setError('');
+
+    try {
+      const savedConfig = await apiRequest('/admin/agent/config', {
+        method: 'PUT',
+        authToken: auth?.token,
+        body: JSON.stringify(agentForm),
+      });
+      const nextAgentStatus = await apiRequest('/admin/agent/status', { authToken: auth?.token });
+      setAgentConfig(savedConfig);
+      setAgentStatus(nextAgentStatus);
+      setAgentForm((current) => ({ ...current, deepseekApiKey: '' }));
+      setAgentMessage('Agent 配置已保存');
+    } catch (requestError) {
+      setAgentMessage('');
+      setError(requestError.message);
+    }
+  }
+
+  function updateAgentForm(field, value) {
+    setAgentForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function switchAdminView(view) {
+    setActiveAdminView(view);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+  }
+
+  async function refreshAdminData() {
+    setIsLoading(true);
+    setError('');
+
+    try {
+      const [nextStats, nextUsers, nextConfig, nextAgentStatus] = await Promise.all([
+        apiRequest('/admin/stats', { authToken: auth?.token }),
+        apiRequest('/admin/users', { authToken: auth?.token }),
+        apiRequest('/admin/agent/config', { authToken: auth?.token }),
+        apiRequest('/admin/agent/status', { authToken: auth?.token }),
+      ]);
+
+      setStats(nextStats);
+      setUsers(nextUsers);
+      setAgentConfig(nextConfig);
+      setAgentStatus(nextAgentStatus);
+      setAgentForm((current) => ({
+        ...current,
+        deepseekBaseUrl: nextConfig.deepseekBaseUrl,
+        deepseekModel: nextConfig.deepseekModel,
+        jimengMode: nextConfig.jimengMode,
+        jimengApiUrl: nextConfig.jimengApiUrl || '',
+      }));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  if (!auth?.user || auth.user.role !== 'admin') {
+    return (
+      <main className="admin-shell">
+        <div className="empty-admin-state">
+          <Shield size={36} />
+          <h1>需要管理员权限</h1>
+          <p>请使用管理员账号登录后再进入后台管理页面。</p>
+          <button className="primary-button" onClick={() => goTo(LOGIN_ROUTE)}>
+            去登录
+            <ArrowRight size={18} />
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  const statCards = [
+    { label: '注册用户', value: stats?.totalUsers ?? '-', icon: Users },
+    { label: '活跃账号', value: stats?.activeUsers ?? '-', icon: BadgeCheck },
+    { label: '7 日登录', value: stats?.recentLogins ?? '-', icon: CalendarClock },
+    { label: '分镜任务', value: stats?.generatedShots ?? '-', icon: Clapperboard },
+    { label: 'Agent 任务', value: stats?.agentRuns ?? '-', icon: Bot },
+    { label: '运行中', value: stats?.activeAgentRuns ?? '-', icon: Loader2 },
+    { label: '失败任务', value: stats?.failedAgentRuns ?? '-', icon: AlertTriangle },
+    { label: '队列长度', value: stats?.queueSize ?? '-', icon: Workflow },
+  ];
+
+  const adminInsights = [
+    {
+      label: 'Agent 接入状态',
+      value: agentConfig?.deepseekApiKeySet ? '已接入' : '待配置',
+      text: agentConfig?.deepseekApiKeySet ? 'DeepSeek 密钥已保存，可直接处理创作任务。' : '配置 API Key 后可开启真实 Agent 流程。',
+      icon: ShieldCheck,
+    },
+    {
+      label: '当前队列',
+      value: `${agentStatus?.queueSize ?? 0}`,
+      text: `${agentStatus?.runningRuns ?? 0} 个任务运行中，${agentStatus?.failedRuns ?? 0} 个任务失败。`,
+      icon: Workflow,
+    },
+    {
+      label: '用户规模',
+      value: `${stats?.activeUsers ?? 0}/${stats?.totalUsers ?? 0}`,
+      text: '活跃账号 / 注册账号，便于快速判断早期使用情况。',
+      icon: Users,
+    },
+  ];
+
+  const adminMenuItems = [
+    { id: 'overview', label: '运营概览', icon: BarChart3, description: '用户、Agent 与任务状态' },
+    { id: 'agent', label: 'Agent 控制台', icon: Bot, description: '模型、队列与最近运行' },
+    { id: 'users', label: '用户管理', icon: Users, description: '账号、角色与登录状态' },
+    { id: 'system', label: '系统配置', icon: Settings2, description: '服务状态与后台参数' },
+  ];
+  const activeAdminMeta = adminMenuItems.find((item) => item.id === activeAdminView) || adminMenuItems[0];
+
+  return (
+    <main className="admin-shell admin-dashboard-shell">
+      <aside className="admin-sidebar">
+        <button className="brand-mark brand-button" onClick={onShowIntro}>
+          <Film size={20} />
+          <span>Dreamina Studio</span>
+        </button>
+        <nav className="admin-menu" aria-label="后台功能目录">
+          {adminMenuItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={activeAdminView === item.id ? 'active' : ''}
+                key={item.id}
+                type="button"
+                onClick={() => switchAdminView(item.id)}
+              >
+                <Icon size={17} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="header-actions">
+          <button className="icon-text-button" onClick={onShowCreate}>
+            <WandSparkles size={16} />
+            创作台
+          </button>
+          <button className="icon-text-button danger" onClick={onLogout}>
+            <LogOut size={16} />
+            退出
+          </button>
+        </div>
+      </aside>
+
+      <section className="admin-main">
+        <div className="admin-topbar">
+          <div>
+            <strong>{activeAdminMeta.label}</strong>
+            <span>{activeAdminMeta.description}</span>
+          </div>
+          <div className="admin-topbar-actions">
+            <button className="ghost-button" onClick={refreshAdminData} disabled={isLoading}>
+              {isLoading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+              同步数据
+            </button>
+            <button className="ghost-button" onClick={onShowIntro}>
+              <Sparkles size={16} />
+              团队官网
+            </button>
+          </div>
+        </div>
+
+        <div className="admin-content">
+          {activeAdminView === 'overview' ? (
+            <>
+              <section className="admin-hero">
+                <div>
+                  <div className="eyebrow">
+                    <ShieldCheck size={14} />
+                    管理员后台
+                  </div>
+                  <h1>用户情况与运营概览</h1>
+                  <p>查看注册用户、最近登录、账号角色和当前创作任务情况，后续可继续扩展权限、订单和项目管理。</p>
+                  <div className="admin-hero-actions">
+                    <button className="primary-button" onClick={onShowCreate}>
+                      <WandSparkles size={18} />
+                      进入创作台
+                    </button>
+                    <button className="secondary-link-button" type="button" onClick={() => switchAdminView('agent')}>
+                      Agent 配置
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
+                </div>
+                <div className="admin-user-chip">
+                  <span>{auth.user.name.slice(0, 1).toUpperCase()}</span>
+                  <div>
+                    <strong>{auth.user.name}</strong>
+                    <small>{auth.user.email}</small>
+                  </div>
+                </div>
+              </section>
+
+              <section className="admin-insight-grid">
+                {adminInsights.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <article className="admin-insight-card" key={item.label}>
+                      <span>
+                        <Icon size={17} />
+                        {item.label}
+                      </span>
+                      <strong>{item.value}</strong>
+                      <p>{item.text}</p>
+                    </article>
+                  );
+                })}
+              </section>
+
+              <section className="admin-stat-grid">
+                {statCards.map((card, index) => {
+                  const Icon = card.icon;
+                  return (
+                    <article className={`admin-stat-card admin-stat-card-${index + 1}`} key={card.label}>
+                      <Icon size={20} />
+                      <strong>{card.value}</strong>
+                      <span>{card.label}</span>
+                    </article>
+                  );
+                })}
+              </section>
+            </>
+          ) : null}
+
+          {activeAdminView === 'agent' ? (
+            <section className="admin-panel agent-admin-panel">
+              <div className="section-heading">
+                <span>
+                  <Bot size={18} />
+                  Agent 控制台
+                </span>
+                <small>
+                  {agentConfig?.deepseekApiKeySet ? 'DeepSeek V4 Flash 已配置' : '等待配置 DeepSeek API Key'}
+                </small>
+              </div>
+
+              <div className="agent-console-grid">
+                <form className="agent-config-form" onSubmit={handleAgentConfigSubmit}>
+                <label className="auth-field">
+                  <span>DeepSeek Base URL</span>
+                  <div>
+                    <Link2 size={17} />
+                    <input
+                      value={agentForm.deepseekBaseUrl}
+                      onChange={(event) => updateAgentForm('deepseekBaseUrl', event.target.value)}
+                      placeholder="https://api.deepseek.com"
+                    />
+                  </div>
+                </label>
+
+                <label className="auth-field">
+                  <span>Agent 模型</span>
+                  <div>
+                    <Bot size={17} />
+                    <input
+                      value={agentForm.deepseekModel}
+                      onChange={(event) => updateAgentForm('deepseekModel', event.target.value)}
+                      placeholder="deepseek-v4-flash"
+                    />
+                  </div>
+                </label>
+
+                <label className="auth-field">
+                  <span>DeepSeek API Key</span>
+                  <div>
+                    <Lock size={17} />
+                    <input
+                      type="password"
+                      value={agentForm.deepseekApiKey}
+                      onChange={(event) => updateAgentForm('deepseekApiKey', event.target.value)}
+                      placeholder={agentConfig?.deepseekApiKeySet ? '留空则保持当前密钥' : '请输入管理员 API Key'}
+                    />
+                  </div>
+                </label>
+
+                <label className="auth-field">
+                  <span>即梦接入模式</span>
+                  <div>
+                    <Clapperboard size={17} />
+                    <input
+                      value={agentForm.jimengMode}
+                      onChange={(event) => updateAgentForm('jimengMode', event.target.value)}
+                      placeholder="mock / api"
+                    />
+                  </div>
+                </label>
+
+                <label className="auth-field">
+                  <span>即梦 API 地址</span>
+                  <div>
+                    <Route size={17} />
+                    <input
+                      value={agentForm.jimengApiUrl}
+                      onChange={(event) => updateAgentForm('jimengApiUrl', event.target.value)}
+                      placeholder="后续接入真实即梦 API 时填写"
+                    />
+                  </div>
+                </label>
+
+                <button className="submit-button">
+                  <ShieldCheck size={18} />
+                  保存 Agent 配置
+                </button>
+                {agentMessage ? <p className="agent-message">{agentMessage}</p> : null}
+              </form>
+
+              <div className="agent-status-panel">
+                <div className="agent-status-grid">
+                  <div className="agent-status-card">
+                    <span>DeepSeek</span>
+                    <strong>{agentStatus?.config?.deepseekModel || 'deepseek-v4-flash'}</strong>
+                    <small>{agentStatus?.config?.deepseekApiKeySet ? 'API Key 已保存' : '未配置 API Key'}</small>
+                  </div>
+                  <div className="agent-status-card">
+                    <span>即梦队列</span>
+                    <strong>{agentStatus?.queueSize ?? 0}</strong>
+                    <small>{agentStatus?.activeCookies ?? 0} 个可用账号节点</small>
+                  </div>
+                  <div className="agent-status-card">
+                    <span>运行中任务</span>
+                    <strong>{agentStatus?.runningRuns ?? 0}</strong>
+                    <small>{agentStatus?.failedRuns ?? 0} 个失败任务</small>
+                  </div>
+                </div>
+
+                <div className="agent-run-list">
+                  <div className="agent-run-list-head">
+                    <strong>最近运行</strong>
+                    <small>{(agentStatus?.recentRuns || []).length} 条记录</small>
+                  </div>
+                  {(agentStatus?.recentRuns || []).length === 0 ? (
+                    <p>还没有 Agent 运行记录。</p>
+                  ) : (
+                    agentStatus.recentRuns.map((run) => (
+                      <article className="agent-run-item" key={run.id}>
+                        <div>
+                          <strong>{run.idea}</strong>
+                          <small>{run.userEmail} / {run.agentModel}</small>
+                        </div>
+                        <span className={`status-pill ${run.status === 'failed' ? 'failed' : run.status === 'completed' ? 'done' : 'active'}`}>
+                          {run.status}
+                        </span>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </div>
+              </div>
+            </section>
+          ) : null}
+
+          {activeAdminView === 'users' ? (
+            <section className="admin-panel">
+              <div className="section-heading">
+                <span>
+                  <Users size={18} />
+                  用户列表
+                </span>
+                <small>{isLoading ? '同步中...' : `${users.length} 位用户`}</small>
+              </div>
+
+              {error ? (
+                <div className="api-error">
+                  <AlertTriangle size={15} />
+                  <span>{error}</span>
+                </div>
+              ) : null}
+
+              <div className="user-table">
+                <div className="user-row user-row-head">
+                  <span>用户</span>
+                  <span>角色</span>
+                  <span>状态</span>
+                  <span>登录次数</span>
+                  <span>最近登录</span>
+                </div>
+                {users.map((userItem) => (
+                  <div className="user-row" key={userItem.id}>
+                    <span className="user-identity">
+                      <span className="user-avatar">{userItem.name.slice(0, 1).toUpperCase()}</span>
+                      <span>
+                        <strong>{userItem.name}</strong>
+                        <small>{userItem.email}</small>
+                      </span>
+                    </span>
+                    <em className={`role-badge ${userItem.role === 'admin' ? 'admin' : ''}`}>
+                      {userItem.role === 'admin' ? '管理员' : '用户'}
+                    </em>
+                    <em className={`status-badge ${userItem.status === 'active' ? 'active' : 'locked'}`}>
+                      {userItem.status === 'active' ? '正常' : '停用'}
+                    </em>
+                    <em>{userItem.loginCount}</em>
+                    <em>{formatDate(userItem.lastLoginAt)}</em>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {activeAdminView === 'system' ? (
+            <section className="admin-panel admin-system-panel">
+              <div className="section-heading">
+                <span>
+                  <Settings2 size={18} />
+                  系统配置
+                </span>
+                <small>本地服务与运行参数</small>
+              </div>
+              <div className="admin-system-grid">
+                <article className="admin-system-card">
+                  <span>
+                    <ShieldCheck size={17} />
+                    登录权限
+                  </span>
+                  <strong>管理员专用</strong>
+                  <p>当前后台仅允许 admin 角色访问，未授权用户会被引导到登录页。</p>
+                </article>
+                <article className="admin-system-card">
+                  <span>
+                    <Route size={17} />
+                    API 网关
+                  </span>
+                  <strong>{API_BASE_URL}</strong>
+                  <p>前端请求统一通过该地址转发，便于部署时切换后端入口。</p>
+                </article>
+                <article className="admin-system-card">
+                  <span>
+                    <Bot size={17} />
+                    Agent 模式
+                  </span>
+                  <strong>{agentConfig?.jimengMode || agentForm.jimengMode}</strong>
+                  <p>可在 Agent 控制台里调整即梦接入模式与 DeepSeek 模型参数。</p>
+                </article>
+              </div>
+              <div className="admin-system-actions">
+                <button className="primary-button" type="button" onClick={() => switchAdminView('agent')}>
+                  <Bot size={18} />
+                  配置 Agent
+                </button>
+                <button className="secondary-link-button" type="button" onClick={refreshAdminData} disabled={isLoading}>
+                  {isLoading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                  同步系统状态
+                </button>
+              </div>
+            </section>
+          ) : null}
+        </div>
+      </section>
+    </main>
+  );
 }
 
 function createScenes(duration, idea, style, projectId = 'demo') {
@@ -572,7 +1277,7 @@ function formatTime(seconds) {
   return `${mins}:${String(secs).padStart(2, '0')}`;
 }
 
-function Workspace({ onShowIntro }) {
+function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const timers = useRef([]);
   const imageUrls = useRef(new Set());
   const scenesRef = useRef([]);
@@ -648,15 +1353,14 @@ function Workspace({ onShowIntro }) {
     timers.current.forEach((timer) => clearInterval(timer));
     timers.current = [];
 
-    const projectId = `project-${Date.now()}`;
-    const nextScenes = createScenes(duration, idea, style, projectId).map((scene) => ({
+    const placeholderScenes = createScenes(duration, idea, style, `pending-${Date.now()}`).map((scene) => ({
       ...scene,
       status: 'queued',
       progress: 0,
     }));
 
-    scenesRef.current = nextScenes;
-    setScenes(nextScenes);
+    scenesRef.current = placeholderScenes;
+    setScenes(placeholderScenes);
     setIsGenerating(true);
     setStageIndex(0);
     setProgress(6);
@@ -669,71 +1373,52 @@ function Workspace({ onShowIntro }) {
     }, 1400);
 
     try {
-      await Promise.all(
-        nextScenes.map((scene) =>
-          apiRequest(`/generate/${encodeURIComponent(scene.id)}`, {
-            method: 'POST',
-            body: JSON.stringify({
-              id: scene.id,
-              prompt: scene.prompt,
-              duration: Math.min(duration, 15),
-              engine: 'jimeng',
-              status: 'idle',
-              progress: 0,
-              characterIds: [],
-              caption: `${scene.title} / ${ratio}`,
-            }),
-          }),
-        ),
-      );
+      const agentRun = await apiRequest('/agent/runs', {
+        method: 'POST',
+        authToken: auth?.token,
+        body: JSON.stringify({
+          idea,
+          duration,
+          style,
+          ratio,
+          imageNames: images.map((image) => image.name),
+        }),
+      });
+
+      setApiStatus(`Agent Run: ${agentRun.id}`);
 
       const pollTimer = setInterval(async () => {
         try {
-          const serverShots = await apiRequest('/shots');
-          const shotMap = new Map(serverShots.map((shot) => [shot.id, shot]));
-          const syncedScenes = scenesRef.current.map((scene) => {
-            const shot = shotMap.get(scene.id);
-            if (!shot) return scene;
-
-            return {
-              ...scene,
-              status: backendStatusToUiStatus[shot.status] || scene.status,
-              progress: shot.progress ?? scene.progress,
-              videoUrl: shot.videoUrl || scene.videoUrl,
-              error: shot.error || '',
-            };
+          const latestRun = await apiRequest(`/agent/runs/${encodeURIComponent(agentRun.id)}`, {
+            authToken: auth?.token,
           });
-          const progressSum = syncedScenes.reduce((sum, scene) => sum + scene.progress, 0);
-          const nextProgress = Math.round(progressSum / Math.max(syncedScenes.length, 1));
-          const isFinished = syncedScenes.every((scene) => ['done', 'failed'].includes(scene.status));
+          const syncedScenes = latestRun.scenes.length > 0
+            ? latestRun.scenes.map((scene) => ({
+                ...scene,
+                status: scene.status === 'completed'
+                  ? 'done'
+                  : scene.status === 'generating'
+                    ? 'active'
+                    : scene.status === 'failed'
+                      ? 'failed'
+                      : 'queued',
+              }))
+            : scenesRef.current;
+          const isFinished = ['completed', 'failed'].includes(latestRun.status);
 
           scenesRef.current = syncedScenes;
           setScenes(syncedScenes);
-          setProgress(nextProgress);
+          setProgress(latestRun.progress ?? progress);
+          setApiStatus(`Agent: ${latestRun.stage}`);
+          if (latestRun.error) setApiError(latestRun.error);
 
           if (isFinished) {
             clearInterval(pollTimer);
             clearInterval(stageTimer);
             setStageIndex(agentStages.length - 1);
             setIsGenerating(false);
-
-            const latestScenes = await apiRequest('/shots');
-            const completedShotIds = nextScenes
-              .filter((scene) => latestScenes.some((shot) => shot.id === scene.id && shot.status === 'completed'))
-              .map((scene) => scene.id);
-
-            if (completedShotIds.length > 0) {
-              const compiledVideo = await apiRequest('/compile', {
-                method: 'POST',
-                body: JSON.stringify({
-                  shotIds: completedShotIds,
-                  totalDuration: duration,
-                  bgm: 'lofi',
-                  bgmVolume: 30,
-                  voiceVolume: 80,
-                }),
-              });
-              setFinalVideoUrl(compiledVideo.video_url);
+            if (latestRun.finalVideoUrl) {
+              setFinalVideoUrl(latestRun.finalVideoUrl);
               setProgress(100);
             }
           }
@@ -750,7 +1435,7 @@ function Workspace({ onShowIntro }) {
       clearInterval(stageTimer);
       setApiError(error.message);
       setIsGenerating(false);
-      setScenes(nextScenes.map((scene) => ({ ...scene, status: 'failed', error: error.message })));
+      setScenes(placeholderScenes.map((scene) => ({ ...scene, status: 'failed', error: error.message })));
     }
   }
 
@@ -762,15 +1447,30 @@ function Workspace({ onShowIntro }) {
           <span>Dreamina Studio</span>
         </div>
         <div className="header-actions">
+          {auth?.user ? (
+            <div className="session-chip">
+              <User size={15} />
+              <span>{auth.user.name}</span>
+            </div>
+          ) : null}
           <button className="icon-text-button" onClick={onShowIntro}>
             <Sparkles size={16} />
             团队官网
           </button>
+          {auth?.user?.role === 'admin' ? (
+            <button className="icon-text-button" onClick={onShowAdmin}>
+              <Shield size={16} />
+              管理后台
+            </button>
+          ) : null}
           <button className="icon-button" title="新建项目">
             <Plus size={18} />
           </button>
           <button className="icon-button" title="设置">
             <Settings2 size={18} />
+          </button>
+          <button className="icon-button" title="退出登录" onClick={onLogout}>
+            <LogOut size={18} />
           </button>
         </div>
       </header>
@@ -1024,14 +1724,12 @@ function Workspace({ onShowIntro }) {
 }
 
 export default function App() {
-  const [page, setPage] = useState(() => {
-    if (typeof window === 'undefined') return 'home';
-    return window.location.hash === CREATE_ROUTE ? 'create' : 'home';
-  });
+  const [page, setPage] = useState(() => getPageFromHash());
+  const [auth, setAuth] = useState(() => readStoredAuth());
 
   useEffect(() => {
     const handleHashChange = () => {
-      setPage(window.location.hash === CREATE_ROUTE ? 'create' : 'home');
+      setPage(getPageFromHash());
       window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
     };
 
@@ -1042,20 +1740,79 @@ export default function App() {
   }, []);
 
   function enterWorkspace() {
-    window.location.hash = CREATE_ROUTE;
-    setPage('create');
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+    goTo(auth?.user ? CREATE_ROUTE : LOGIN_ROUTE);
   }
 
   function showIntroAgain() {
-    window.location.hash = HOME_ROUTE;
-    setPage('home');
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+    goTo(HOME_ROUTE);
   }
 
-  return page === 'create' ? (
-    <Workspace onShowIntro={showIntroAgain} />
-  ) : (
-    <IntroPage onStart={enterWorkspace} />
-  );
+  function handleAuthSuccess(nextAuth) {
+    setAuth(nextAuth);
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+    goTo(nextAuth.user.role === 'admin' ? ADMIN_ROUTE : CREATE_ROUTE);
+  }
+
+  function handleLogout() {
+    setAuth(null);
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    goTo(HOME_ROUTE);
+  }
+
+  if (page === 'login') {
+    return (
+      <AuthPage
+        mode="login"
+        onAuthSuccess={handleAuthSuccess}
+        onSwitchMode={() => goTo(REGISTER_ROUTE)}
+        onShowHome={showIntroAgain}
+      />
+    );
+  }
+
+  if (page === 'register') {
+    return (
+      <AuthPage
+        mode="register"
+        onAuthSuccess={handleAuthSuccess}
+        onSwitchMode={() => goTo(LOGIN_ROUTE)}
+        onShowHome={showIntroAgain}
+      />
+    );
+  }
+
+  if (page === 'admin') {
+    return (
+      <AdminPage
+        auth={auth}
+        onShowIntro={showIntroAgain}
+        onShowCreate={() => goTo(auth?.user ? CREATE_ROUTE : LOGIN_ROUTE)}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  if (page === 'create') {
+    if (!auth?.user) {
+      return (
+        <AuthPage
+          mode="login"
+          onAuthSuccess={handleAuthSuccess}
+          onSwitchMode={() => goTo(REGISTER_ROUTE)}
+          onShowHome={showIntroAgain}
+        />
+      );
+    }
+
+    return (
+      <Workspace
+        auth={auth}
+        onShowIntro={showIntroAgain}
+        onShowAdmin={() => goTo(ADMIN_ROUTE)}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  return <IntroPage onStart={enterWorkspace} />;
 }
