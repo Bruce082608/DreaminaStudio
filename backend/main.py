@@ -192,18 +192,24 @@ async def queue_worker():
             # Assign cookie if engine is Jimeng
             assigned_cookie_id = None
             if shot.engine == "jimeng":
-                # Find active cookie with fewer than 2 active tasks
-                available_cookies = [
-                    c for c in cookie_pool.values() 
-                    if c.status == "active" and c.activeTasks < 2
-                ]
-                
-                if not available_cookies:
-                    # No healthy cookies available
-                    shot.status = "failed"
-                    shot.error = "逆向网关异常：即梦 Cookie 账号池无空闲可用节点 (账号占满或已失效)"
-                    logger.warning(f"Failed to schedule shot {shot_id}: No healthy cookies available.")
-                    task_queue.task_done()
+                while True:
+                    active_cookies = [c for c in cookie_pool.values() if c.status == "active"]
+                    available_cookies = [c for c in active_cookies if c.activeTasks < 2]
+
+                    if available_cookies:
+                        break
+
+                    if not active_cookies:
+                        shot.status = "failed"
+                        shot.error = "逆向网关异常：即梦 Cookie 账号池无可用节点 (账号已失效)"
+                        logger.warning(f"Failed to schedule shot {shot_id}: No healthy cookies available.")
+                        task_queue.task_done()
+                        break
+
+                    logger.info(f"All Jimeng cookies are busy. Waiting to schedule shot {shot_id}.")
+                    await asyncio.sleep(1)
+
+                if shot.status == "failed":
                     continue
                 
                 # Pick the cookie with lowest current active load

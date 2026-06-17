@@ -1472,6 +1472,20 @@
   box-shadow: none;
 }
 
+.api-error {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.78rem;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 0.75rem;
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .director-panel {
   display: grid;
   gap: 1rem;
@@ -1506,6 +1520,11 @@
 .preview-image {
   opacity: 0.66;
   animation: media-breathe 10s ease-in-out infinite reverse;
+}
+
+.preview-video {
+  opacity: 1;
+  animation: none;
 }
 
 .video-shine {
@@ -1549,6 +1568,11 @@
 
 .export-row button {
   justify-content: center;
+}
+
+.export-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .progress-track,
@@ -1729,6 +1753,11 @@
   color: #aeb9c8;
 }
 
+.status-pill.failed {
+  background: rgba(248, 113, 113, 0.13);
+  color: #fca5a5;
+}
+
 .scene-main p {
   display: -webkit-box;
   min-height: 3.9rem;
@@ -1740,6 +1769,17 @@
   font-size: 0.76rem;
   line-height: 1.65;
   transition: min-height 220ms ease;
+}
+
+.scene-error {
+  display: block;
+  margin: -0.25rem 0 0.65rem;
+  overflow: hidden;
+  color: #fca5a5;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scene-card:hover .scene-main p {

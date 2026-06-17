@@ -34,6 +34,7 @@ import './App.css';
 
 const HOME_ROUTE = '#/';
 const CREATE_ROUTE = '#/create';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
 const durationOptions = [
   { label: '30秒', value: 30, scenes: 3 },
@@ -47,22 +48,42 @@ const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '�
 const ratioOptions = ['16:9', '9:16', '1:1'];
 
 const visualAssets = {
-  neonCity:
-    'https://images.unsplash.com/photo-1636414795389-2cd7bb362560?auto=format&fit=crop&w=1200&q=80',
-  editingTimeline:
-    'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
-  storyboard:
-    'https://images.unsplash.com/photo-1681372751506-1586b0542195?auto=format&fit=crop&w=1200&q=80',
-  filmSet:
-    'https://images.unsplash.com/photo-1750905014980-c0e6ab6f3fbb?auto=format&fit=crop&w=1200&q=80',
-  controlRoom:
-    'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
-  productionDesk:
-    'https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1200&q=80',
+  heroConsole: new URL('./assets/gallery/hero-console.jpg', import.meta.url).href,
+  workspacePreview: new URL('./assets/gallery/workspace-preview.jpg', import.meta.url).href,
+  missionInfra: new URL('./assets/gallery/mission-infra.jpg', import.meta.url).href,
+  missionTiming: new URL('./assets/gallery/mission-timing.jpg', import.meta.url).href,
+  missionBelief: new URL('./assets/gallery/mission-belief.jpg', import.meta.url).href,
+  painFragmented: new URL('./assets/gallery/pain-fragmented.jpg', import.meta.url).href,
+  painContext: new URL('./assets/gallery/pain-context.jpg', import.meta.url).href,
+  painCost: new URL('./assets/gallery/pain-cost.jpg', import.meta.url).href,
+  valueStructure: new URL('./assets/gallery/value-structure.jpg', import.meta.url).href,
+  valueContinuity: new URL('./assets/gallery/value-continuity.jpg', import.meta.url).href,
+  valueAgent: new URL('./assets/gallery/value-agent.jpg', import.meta.url).href,
+  valueDelivery: new URL('./assets/gallery/value-delivery.jpg', import.meta.url).href,
 };
 
-const painVisuals = [visualAssets.editingTimeline, visualAssets.neonCity, visualAssets.productionDesk];
-const valueVisuals = [visualAssets.storyboard, visualAssets.neonCity, visualAssets.controlRoom, visualAssets.filmSet];
+const teamVisuals = [
+  visualAssets.missionInfra,
+  visualAssets.missionTiming,
+  visualAssets.missionBelief,
+];
+
+const painVisuals = [
+  visualAssets.painFragmented,
+  visualAssets.painContext,
+  visualAssets.painCost,
+];
+
+const valueVisuals = [
+  visualAssets.valueStructure,
+  visualAssets.valueContinuity,
+  visualAssets.valueAgent,
+  visualAssets.valueDelivery,
+];
+
+const sceneVisuals = Array.from({ length: 12 }, (_, index) =>
+  new URL(`./assets/gallery/scene-${String(index + 1).padStart(2, '0')}.jpg`, import.meta.url).href,
+);
 
 const agentStages = [
   '解析创意意图',
@@ -72,6 +93,14 @@ const agentStages = [
   '提交即梦任务',
   '合成最终成片',
 ];
+
+const backendStatusToUiStatus = {
+  idle: 'locked',
+  waiting: 'queued',
+  generating: 'active',
+  completed: 'done',
+  failed: 'failed',
+};
 
 const sampleProjects = [
   { title: '雨夜未来城预告片', time: '今天 13:20', duration: '3分钟', status: '已完成' },
@@ -263,7 +292,7 @@ function IntroPage({ onStart }) {
             <strong>长片编排台</strong>
           </div>
           <div className="console-video">
-            <img className="console-video-image" src={visualAssets.editingTimeline} alt="" loading="lazy" />
+            <img className="console-video-image" src={visualAssets.heroConsole} alt="" loading="lazy" />
             <div className="play-ring">
               <Play size={28} fill="currentColor" />
             </div>
@@ -316,12 +345,12 @@ function IntroPage({ onStart }) {
             </p>
           </div>
           <div className="team-card-stack">
-            {teamHighlights.map((item) => {
+            {teamHighlights.map((item, index) => {
               const Icon = item.icon;
               return (
                 <article className="motion-card team-card" key={item.title}>
                   <div className="card-media">
-                    <img src={visualAssets.controlRoom} alt="" loading="lazy" />
+                    <img src={teamVisuals[index]} alt="" loading="lazy" />
                   </div>
                   <Icon size={21} />
                   <h3>{item.title}</h3>
@@ -483,12 +512,30 @@ function StatusPill({ status }) {
     active: '生成中',
     queued: '等待中',
     locked: '待提交',
+    failed: '失败',
   };
 
   return <span className={`status-pill ${status}`}>{statusMap[status]}</span>;
 }
 
-function createScenes(duration, idea, style) {
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+    ...options,
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    throw new Error(errorBody?.detail || `API request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function createScenes(duration, idea, style, projectId = 'demo') {
   const count = Math.min(Math.ceil(duration / 15), 40);
   const titles = [
     '开场氛围建立',
@@ -508,7 +555,7 @@ function createScenes(duration, idea, style) {
     const status = index < 2 ? 'done' : index === 2 ? 'active' : 'queued';
 
     return {
-      id: `scene-${index + 1}`,
+      id: `${projectId}-scene-${index + 1}`,
       number: String(index + 1).padStart(2, '0'),
       time: `${formatTime(start)} - ${formatTime(end)}`,
       title: titles[index % titles.length],
@@ -527,6 +574,8 @@ function formatTime(seconds) {
 
 function Workspace({ onShowIntro }) {
   const timers = useRef([]);
+  const imageUrls = useRef(new Set());
+  const scenesRef = useRef([]);
   const [idea, setIdea] = useState(defaultIdea);
   const [duration, setDuration] = useState(180);
   const [style, setStyle] = useState('电影感');
@@ -536,6 +585,11 @@ function Workspace({ onShowIntro }) {
   const [stageIndex, setStageIndex] = useState(0);
   const [progress, setProgress] = useState(38);
   const [scenes, setScenes] = useState(() => createScenes(180, defaultIdea, '电影感'));
+  const [apiStatus, setApiStatus] = useState('正在连接服务器...');
+  const [apiError, setApiError] = useState('');
+  const [finalVideoUrl, setFinalVideoUrl] = useState('');
+
+  scenesRef.current = scenes;
 
   const selectedDuration = useMemo(
     () => durationOptions.find((item) => item.value === duration),
@@ -545,7 +599,26 @@ function Workspace({ onShowIntro }) {
   const completeCount = scenes.filter((scene) => scene.status === 'done').length;
 
   useEffect(() => {
-    return () => timers.current.forEach((timer) => clearInterval(timer));
+    const activeImageUrls = imageUrls.current;
+    let isMounted = true;
+
+    apiRequest('/health')
+      .then((health) => {
+        if (isMounted) setApiStatus(`Agent Endpoint: ${health.status}`);
+      })
+      .catch((error) => {
+        if (isMounted) {
+          setApiStatus('Agent Endpoint: Offline');
+          setApiError(error.message);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      timers.current.forEach((timer) => clearInterval(timer));
+      activeImageUrls.forEach((url) => URL.revokeObjectURL(url));
+      activeImageUrls.clear();
+    };
   }, []);
 
   function handleImageUpload(event) {
@@ -555,60 +628,130 @@ function Workspace({ onShowIntro }) {
       name: file.name,
       url: URL.createObjectURL(file),
     }));
-    setImages((current) => [...current, ...nextImages].slice(0, 6));
+
+    nextImages.forEach((image) => imageUrls.current.add(image.url));
+
+    setImages((current) => {
+      const allImages = [...current, ...nextImages];
+      const visibleImages = allImages.slice(0, 6);
+      allImages.slice(6).forEach((image) => {
+        URL.revokeObjectURL(image.url);
+        imageUrls.current.delete(image.url);
+      });
+      return visibleImages;
+    });
+
+    event.target.value = '';
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     timers.current.forEach((timer) => clearInterval(timer));
     timers.current = [];
 
-    const nextScenes = createScenes(duration, idea, style).map((scene, index) => ({
+    const projectId = `project-${Date.now()}`;
+    const nextScenes = createScenes(duration, idea, style, projectId).map((scene) => ({
       ...scene,
-      status: index === 0 ? 'active' : 'queued',
-      progress: index === 0 ? 12 : 0,
+      status: 'queued',
+      progress: 0,
     }));
 
+    scenesRef.current = nextScenes;
     setScenes(nextScenes);
     setIsGenerating(true);
     setStageIndex(0);
     setProgress(6);
+    setApiError('');
+    setFinalVideoUrl('');
 
     const stageTimer = setInterval(() => {
       setStageIndex((current) => Math.min(current + 1, agentStages.length - 1));
       setProgress((current) => Math.min(current + 15, 96));
     }, 1400);
 
-    const sceneTimer = setInterval(() => {
-      setScenes((currentScenes) => {
-        const activeIndex = currentScenes.findIndex((scene) => scene.status === 'active');
+    try {
+      await Promise.all(
+        nextScenes.map((scene) =>
+          apiRequest(`/generate/${encodeURIComponent(scene.id)}`, {
+            method: 'POST',
+            body: JSON.stringify({
+              id: scene.id,
+              prompt: scene.prompt,
+              duration: Math.min(duration, 15),
+              engine: 'jimeng',
+              status: 'idle',
+              progress: 0,
+              characterIds: [],
+              caption: `${scene.title} / ${ratio}`,
+            }),
+          }),
+        ),
+      );
 
-        if (activeIndex === -1) {
-          clearInterval(sceneTimer);
-          clearInterval(stageTimer);
-          setProgress(100);
-          setStageIndex(agentStages.length - 1);
-          setIsGenerating(false);
-          return currentScenes;
-        }
+      const pollTimer = setInterval(async () => {
+        try {
+          const serverShots = await apiRequest('/shots');
+          const shotMap = new Map(serverShots.map((shot) => [shot.id, shot]));
+          const syncedScenes = scenesRef.current.map((scene) => {
+            const shot = shotMap.get(scene.id);
+            if (!shot) return scene;
 
-        const activeScene = currentScenes[activeIndex];
-        if (activeScene.progress >= 100) {
-          return currentScenes.map((scene, index) => {
-            if (index === activeIndex) return { ...scene, status: 'done', progress: 100 };
-            if (index === activeIndex + 1) return { ...scene, status: 'active', progress: 8 };
-            return scene;
+            return {
+              ...scene,
+              status: backendStatusToUiStatus[shot.status] || scene.status,
+              progress: shot.progress ?? scene.progress,
+              videoUrl: shot.videoUrl || scene.videoUrl,
+              error: shot.error || '',
+            };
           });
+          const progressSum = syncedScenes.reduce((sum, scene) => sum + scene.progress, 0);
+          const nextProgress = Math.round(progressSum / Math.max(syncedScenes.length, 1));
+          const isFinished = syncedScenes.every((scene) => ['done', 'failed'].includes(scene.status));
+
+          scenesRef.current = syncedScenes;
+          setScenes(syncedScenes);
+          setProgress(nextProgress);
+
+          if (isFinished) {
+            clearInterval(pollTimer);
+            clearInterval(stageTimer);
+            setStageIndex(agentStages.length - 1);
+            setIsGenerating(false);
+
+            const latestScenes = await apiRequest('/shots');
+            const completedShotIds = nextScenes
+              .filter((scene) => latestScenes.some((shot) => shot.id === scene.id && shot.status === 'completed'))
+              .map((scene) => scene.id);
+
+            if (completedShotIds.length > 0) {
+              const compiledVideo = await apiRequest('/compile', {
+                method: 'POST',
+                body: JSON.stringify({
+                  shotIds: completedShotIds,
+                  totalDuration: duration,
+                  bgm: 'lofi',
+                  bgmVolume: 30,
+                  voiceVolume: 80,
+                }),
+              });
+              setFinalVideoUrl(compiledVideo.video_url);
+              setProgress(100);
+            }
+          }
+        } catch (error) {
+          clearInterval(pollTimer);
+          clearInterval(stageTimer);
+          setApiError(error.message);
+          setIsGenerating(false);
         }
-
-        return currentScenes.map((scene, index) =>
-          index === activeIndex
-            ? { ...scene, progress: Math.min(scene.progress + 23, 100) }
-            : scene,
-        );
       });
-    }, 900);
 
-    timers.current = [stageTimer, sceneTimer];
+      timers.current = [stageTimer, pollTimer];
+    } catch (error) {
+      clearInterval(stageTimer);
+      setApiError(error.message);
+      setIsGenerating(false);
+      setScenes(nextScenes.map((scene) => ({ ...scene, status: 'failed', error: error.message })));
+    }
   }
 
   return (
@@ -664,7 +807,7 @@ function Workspace({ onShowIntro }) {
               <Clapperboard size={18} />
               创作台
             </span>
-            <small>Agent Endpoint: Ready</small>
+            <small>{apiStatus}</small>
           </div>
 
           <label className="idea-composer">
@@ -772,6 +915,12 @@ function Workspace({ onShowIntro }) {
             {isGenerating ? <Loader2 className="spin" size={18} /> : <WandSparkles size={18} />}
             {isGenerating ? '生成中' : '开始生成'}
           </button>
+          {apiError ? (
+            <div className="api-error">
+              <AlertTriangle size={15} />
+              <span>{apiError}</span>
+            </div>
+          ) : null}
         </section>
 
         <section className="director-panel">
@@ -784,18 +933,22 @@ function Workspace({ onShowIntro }) {
               <small>{ratio} / {selectedDuration?.label}</small>
             </div>
             <div className="video-preview">
-              <img className="preview-image" src={visualAssets.neonCity} alt="" loading="lazy" />
+              {finalVideoUrl ? (
+                <video className="preview-image preview-video" src={finalVideoUrl} controls playsInline />
+              ) : (
+                <img className="preview-image" src={visualAssets.workspacePreview} alt="" loading="lazy" />
+              )}
               <div className="video-shine" />
               <button className="play-ring compact" title="播放预览">
                 <Play size={22} fill="currentColor" />
               </button>
               <div className="preview-caption">
-                <strong>{isGenerating ? '片段生成中' : '等待最新任务'}</strong>
+                <strong>{finalVideoUrl ? '服务器已合成预览' : isGenerating ? '片段生成中' : '等待最新任务'}</strong>
                 <span>{completeCount}/{scenes.length} 段完成</span>
               </div>
             </div>
             <div className="export-row">
-              <button>
+              <button onClick={() => finalVideoUrl && window.open(finalVideoUrl, '_blank')} disabled={!finalVideoUrl}>
                 <Download size={16} />
                 下载 MP4
               </button>
@@ -845,7 +998,7 @@ function Workspace({ onShowIntro }) {
             <article className="scene-card" key={scene.id}>
               <img
                 className="scene-card-image"
-                src={index % 2 === 0 ? visualAssets.storyboard : visualAssets.editingTimeline}
+                src={sceneVisuals[index % sceneVisuals.length]}
                 alt=""
                 loading="lazy"
               />
@@ -856,6 +1009,7 @@ function Workspace({ onShowIntro }) {
                   <StatusPill status={scene.status} />
                 </div>
                 <p>{scene.prompt}</p>
+                {scene.error ? <small className="scene-error">{scene.error}</small> : null}
                 <div className="mini-progress">
                   <span style={{ width: `${scene.progress}%` }} />
                 </div>
