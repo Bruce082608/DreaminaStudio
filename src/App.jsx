@@ -77,13 +77,19 @@ function readStoredAuth() {
   }
 }
 
+function BrandLogo() {
+  return <img className="brand-logo-image" src="/dreamina-logo.png" alt="" />;
+}
+
 const durationOptions = [
-  { label: '30秒', value: 30, scenes: 3 },
-  { label: '1分钟', value: 60, scenes: 5 },
-  { label: '3分钟', value: 180, scenes: 12 },
-  { label: '5分钟', value: 300, scenes: 20 },
-  { label: '10分钟', value: 600, scenes: 40 },
+  { label: '30秒', value: 30 },
+  { label: '1分钟', value: 60 },
+  { label: '3分钟', value: 180 },
+  { label: '5分钟', value: 300 },
+  { label: '10分钟', value: 600 },
 ];
+
+const segmentDurationOptions = [5, 10, 15];
 
 const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
 const ratioOptions = ['16:9', '9:16', '1:1'];
@@ -127,13 +133,35 @@ const sceneVisuals = Array.from({ length: 12 }, (_, index) =>
 );
 
 const agentStages = [
-  '解析创意意图',
-  '生成长视频结构',
-  '拆分连续分镜',
-  '统一角色与场景',
-  '提交即梦任务',
-  '合成最终成片',
+  '提交创意与参考图',
+  'DeepSeek 生成三套分镜',
+  '选择并编辑候选剧本',
+  '即梦 CLI 串行生成',
+  '返回视频片段结果',
 ];
+
+const agentStageLabels = {
+  queued: '任务已进入队列',
+  deepseek_planning: 'DeepSeek 正在规划分镜',
+  local_planning: '本地 Agent 正在规划分镜',
+  awaiting_confirmation: '三套候选分镜等待确认',
+  jimeng_dispatch: '正在提交视频生成任务',
+  jimeng_generating: '即梦 CLI 正在逐段生成',
+  completed: '视频片段已全部返回',
+  failed: '任务处理失败',
+};
+
+const agentStageIndexes = {
+  queued: 0,
+  deepseek_planning: 1,
+  local_planning: 1,
+  awaiting_confirmation: 2,
+  jimeng_dispatch: 3,
+  jimeng_generating: 3,
+  completed: 4,
+};
+
+const AGENT_POLL_INTERVAL = 1200;
 
 const sampleProjects = [
   { title: '雨夜未来城预告片', time: '今天 13:20', duration: '3分钟', status: '已完成' },
@@ -270,7 +298,7 @@ function IntroPage({ onStart }) {
 
       <nav className="intro-nav">
         <div className="brand-mark">
-          <Film size={20} />
+          <BrandLogo />
           <span>Dreamina Studio</span>
         </div>
         <div className="intro-nav-links">
@@ -553,8 +581,9 @@ function StatusPill({ status }) {
 
 async function apiRequest(path, options = {}) {
   const { authToken, ...fetchOptions } = options;
+  const isFormData = fetchOptions.body instanceof FormData;
   const headers = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...fetchOptions.headers,
   };
 
@@ -623,7 +652,7 @@ function AuthPage({ mode, onAuthSuccess, onSwitchMode, onShowHome }) {
 
       <nav className="intro-nav auth-nav">
         <button className="brand-mark brand-button" onClick={onShowHome}>
-          <Film size={20} />
+          <BrandLogo />
           <span>Dreamina Studio</span>
         </button>
         <button className="ghost-button" onClick={onSwitchMode}>
@@ -736,8 +765,10 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     deepseekBaseUrl: 'https://api.deepseek.com',
     deepseekModel: 'deepseek-v4-flash',
     deepseekApiKey: '',
-    jimengMode: 'mock',
+    jimengMode: 'cli',
     jimengApiUrl: '',
+    jimengModel: 'jimeng-video-seedance-2.0',
+    jimengRegion: 'cn',
   });
   const [agentMessage, setAgentMessage] = useState('');
 
@@ -764,6 +795,8 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
             deepseekApiKey: '',
             jimengMode: nextConfig.jimengMode,
             jimengApiUrl: nextConfig.jimengApiUrl || '',
+            jimengModel: nextConfig.jimengModel,
+            jimengRegion: nextConfig.jimengRegion,
           });
           setError('');
         }
@@ -833,6 +866,8 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
         deepseekModel: nextConfig.deepseekModel,
         jimengMode: nextConfig.jimengMode,
         jimengApiUrl: nextConfig.jimengApiUrl || '',
+        jimengModel: nextConfig.jimengModel,
+        jimengRegion: nextConfig.jimengRegion,
       }));
     } catch (requestError) {
       setError(requestError.message);
@@ -901,7 +936,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     <main className="admin-shell admin-dashboard-shell">
       <aside className="admin-sidebar">
         <button className="brand-mark brand-button" onClick={onShowIntro}>
-          <Film size={20} />
+          <BrandLogo />
           <span>Dreamina Studio</span>
         </button>
         <nav className="admin-menu" aria-label="后台功能目录">
@@ -1067,23 +1102,42 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                   <span>即梦接入模式</span>
                   <div>
                     <Clapperboard size={17} />
-                    <input
+                    <select
                       value={agentForm.jimengMode}
                       onChange={(event) => updateAgentForm('jimengMode', event.target.value)}
-                      placeholder="mock / api"
+                    >
+                      <option value="cli">内置 CLI</option>
+                      <option value="mock">本地测试</option>
+                    </select>
+                  </div>
+                </label>
+
+                <label className="auth-field">
+                  <span>Seedance 模型</span>
+                  <div>
+                    <Route size={17} />
+                    <input
+                      value={agentForm.jimengModel}
+                      onChange={(event) => updateAgentForm('jimengModel', event.target.value)}
+                      placeholder="jimeng-video-seedance-2.0"
                     />
                   </div>
                 </label>
 
                 <label className="auth-field">
-                  <span>即梦 API 地址</span>
+                  <span>即梦区域</span>
                   <div>
                     <Route size={17} />
-                    <input
-                      value={agentForm.jimengApiUrl}
-                      onChange={(event) => updateAgentForm('jimengApiUrl', event.target.value)}
-                      placeholder="后续接入真实即梦 API 时填写"
-                    />
+                    <select
+                      value={agentForm.jimengRegion}
+                      onChange={(event) => updateAgentForm('jimengRegion', event.target.value)}
+                    >
+                      <option value="cn">中国大陆</option>
+                      <option value="sg">新加坡</option>
+                      <option value="hk">中国香港</option>
+                      <option value="us">美国</option>
+                      <option value="jp">日本</option>
+                    </select>
                   </div>
                 </label>
 
@@ -1102,9 +1156,9 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                     <small>{agentStatus?.config?.deepseekApiKeySet ? 'API Key 已保存' : '未配置 API Key'}</small>
                   </div>
                   <div className="agent-status-card">
-                    <span>即梦队列</span>
-                    <strong>{agentStatus?.queueSize ?? 0}</strong>
-                    <small>{agentStatus?.activeCookies ?? 0} 个可用账号节点</small>
+                    <span>即梦 CLI</span>
+                    <strong>{agentStatus?.config?.jimengCliAvailable ? '已内置' : '不可用'}</strong>
+                    <small>{agentStatus?.config?.jimengTokenPoolConfigured ? '账号池已配置' : '账号池未配置'}</small>
                   </div>
                   <div className="agent-status-card">
                     <span>运行中任务</span>
@@ -1240,8 +1294,20 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
   );
 }
 
-function createScenes(duration, idea, style, projectId = 'demo') {
-  const count = Math.min(Math.ceil(duration / 15), 40);
+function getSceneDurations(duration, segmentDuration) {
+  const count = Math.ceil(duration / segmentDuration);
+  const durations = Array.from({ length: count }, () => segmentDuration);
+  durations[durations.length - 1] = duration - segmentDuration * (count - 1);
+
+  if (durations.length > 1 && durations[durations.length - 1] < 4) {
+    const combined = durations[durations.length - 2] + durations[durations.length - 1];
+    durations[durations.length - 2] = Math.floor(combined / 2);
+    durations[durations.length - 1] = combined - durations[durations.length - 2];
+  }
+  return durations;
+}
+
+function createScenes(duration, idea, style, segmentDuration = 10, projectId = 'demo') {
   const titles = [
     '开场氛围建立',
     '主角动机显现',
@@ -1254,20 +1320,22 @@ function createScenes(duration, idea, style, projectId = 'demo') {
     '尾声与回响',
   ];
 
-  return Array.from({ length: count }).map((_, index) => {
-    const start = index * 15;
-    const end = Math.min(start + 15, duration);
-    const status = index < 2 ? 'done' : index === 2 ? 'active' : 'queued';
-
-    return {
+  let start = 0;
+  return getSceneDurations(duration, segmentDuration).map((sceneDuration, index) => {
+    const end = start + sceneDuration;
+    const status = 'locked';
+    const scene = {
       id: `${projectId}-scene-${index + 1}`,
       number: String(index + 1).padStart(2, '0'),
       time: `${formatTime(start)} - ${formatTime(end)}`,
       title: titles[index % titles.length],
       status,
-      progress: status === 'done' ? 100 : status === 'active' ? 64 : 0,
+      progress: 0,
       prompt: `${style}，延续同一角色、场景光线和镜头语言：${idea}`,
+      duration: sceneDuration,
     };
+    start = end;
+    return scene;
   });
 }
 
@@ -1283,16 +1351,22 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const scenesRef = useRef([]);
   const [idea, setIdea] = useState(defaultIdea);
   const [duration, setDuration] = useState(180);
+  const [segmentDuration, setSegmentDuration] = useState(15);
   const [style, setStyle] = useState('电影感');
   const [ratio, setRatio] = useState('16:9');
   const [images, setImages] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
-  const [progress, setProgress] = useState(38);
-  const [scenes, setScenes] = useState(() => createScenes(180, defaultIdea, '电影感'));
+  const [progress, setProgress] = useState(0);
+  const [scenes, setScenes] = useState(() => createScenes(180, defaultIdea, '电影感', 15));
+  const [candidates, setCandidates] = useState([]);
+  const [selectedCandidateId, setSelectedCandidateId] = useState('');
+  const [activeRunId, setActiveRunId] = useState('');
+  const [isConfirming, setIsConfirming] = useState(false);
   const [apiStatus, setApiStatus] = useState('正在连接服务器...');
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
+  const [runStatus, setRunStatus] = useState('idle');
 
   scenesRef.current = scenes;
 
@@ -1302,6 +1376,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   );
 
   const completeCount = scenes.filter((scene) => scene.status === 'done').length;
+  const runLocked = isGenerating || isConfirming || runStatus === 'awaiting_confirmation';
 
   useEffect(() => {
     const activeImageUrls = imageUrls.current;
@@ -1320,11 +1395,91 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
 
     return () => {
       isMounted = false;
-      timers.current.forEach((timer) => clearInterval(timer));
+      timers.current.forEach((timer) => clearTimeout(timer));
       activeImageUrls.forEach((url) => URL.revokeObjectURL(url));
       activeImageUrls.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (Math.ceil(duration / segmentDuration) > 40) {
+      setSegmentDuration(15);
+    }
+  }, [duration, segmentDuration]);
+
+  useEffect(() => {
+    if (runStatus !== 'idle') return;
+
+    const draftScenes = createScenes(duration, idea, style, segmentDuration);
+    scenesRef.current = draftScenes;
+    setScenes(draftScenes);
+  }, [duration, idea, style, segmentDuration, runStatus]);
+
+  function clearTaskTimers() {
+    timers.current.forEach((timer) => clearTimeout(timer));
+    timers.current = [];
+  }
+
+  function syncAgentRun(latestRun) {
+    let syncedScenes = latestRun.scenes.length > 0
+      ? latestRun.scenes.map((scene) => ({
+          ...scene,
+          status: scene.status === 'completed'
+            ? 'done'
+            : scene.status === 'generating'
+              ? 'active'
+              : scene.status === 'failed'
+                ? 'failed'
+                : 'queued',
+        }))
+      : scenesRef.current;
+
+    if (latestRun.status === 'awaiting_confirmation' && latestRun.candidates?.length === 3) {
+      const firstCandidate = latestRun.candidates[0];
+      setCandidates(latestRun.candidates);
+      setSelectedCandidateId(firstCandidate.id);
+      syncedScenes = firstCandidate.scenes.map((scene) => ({ ...scene, status: 'locked', progress: 0 }));
+    }
+
+    scenesRef.current = syncedScenes;
+    setScenes(syncedScenes);
+    setProgress(latestRun.progress ?? 0);
+    setRunStatus(latestRun.status);
+    setStageIndex(agentStageIndexes[latestRun.stage] ?? 0);
+    setApiStatus(`Agent · ${agentStageLabels[latestRun.stage] || latestRun.stage}`);
+
+    if (latestRun.finalVideoUrl) {
+      setFinalVideoUrl(latestRun.finalVideoUrl);
+    }
+
+    if (latestRun.status === 'failed') {
+      setApiError(latestRun.error || 'Agent 未能完成这次任务，请稍后重试。');
+    }
+
+    return ['awaiting_confirmation', 'completed', 'failed'].includes(latestRun.status);
+  }
+
+  async function pollAgentRun(runId) {
+    try {
+      const latestRun = await apiRequest(`/agent/runs/${encodeURIComponent(runId)}`, {
+        authToken: auth?.token,
+      });
+      const isFinished = syncAgentRun(latestRun);
+
+      if (isFinished) {
+        clearTaskTimers();
+        setIsGenerating(false);
+        return;
+      }
+
+      timers.current = [setTimeout(() => pollAgentRun(runId), AGENT_POLL_INTERVAL)];
+    } catch (error) {
+      clearTaskTimers();
+      setApiError(error.message);
+      setRunStatus('failed');
+      setIsGenerating(false);
+    }
+  }
 
   function handleImageUpload(event) {
     const files = Array.from(event.target.files || []);
@@ -1332,6 +1487,8 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
       id: `${file.name}-${file.lastModified}`,
       name: file.name,
       url: URL.createObjectURL(file),
+      file,
+      uploadId: '',
     }));
 
     nextImages.forEach((image) => imageUrls.current.add(image.url));
@@ -1350,10 +1507,17 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   }
 
   async function handleSubmit() {
-    timers.current.forEach((timer) => clearInterval(timer));
-    timers.current = [];
+    if (runLocked || !idea.trim()) return;
 
-    const placeholderScenes = createScenes(duration, idea, style, `pending-${Date.now()}`).map((scene) => ({
+    clearTaskTimers();
+
+    const placeholderScenes = createScenes(
+      duration,
+      idea,
+      style,
+      segmentDuration,
+      `pending-${Date.now()}`,
+    ).map((scene) => ({
       ...scene,
       status: 'queued',
       progress: 0,
@@ -1364,86 +1528,134 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     setIsGenerating(true);
     setStageIndex(0);
     setProgress(6);
+    setRunStatus('queued');
     setApiError('');
     setFinalVideoUrl('');
-
-    const stageTimer = setInterval(() => {
-      setStageIndex((current) => Math.min(current + 1, agentStages.length - 1));
-      setProgress((current) => Math.min(current + 15, 96));
-    }, 1400);
+    setCandidates([]);
+    setSelectedCandidateId('');
 
     try {
+      const uploadedImages = await Promise.all(images.map(async (image) => {
+        if (image.uploadId) return image;
+        const formData = new FormData();
+        formData.append('image', image.file, image.name);
+        const uploaded = await apiRequest('/agent/uploads', {
+          method: 'POST',
+          authToken: auth?.token,
+          body: formData,
+        });
+        return { ...image, uploadId: uploaded.id };
+      }));
+      setImages(uploadedImages);
+
       const agentRun = await apiRequest('/agent/runs', {
         method: 'POST',
         authToken: auth?.token,
         body: JSON.stringify({
           idea,
           duration,
+          segmentDuration,
           style,
           ratio,
-          imageNames: images.map((image) => image.name),
+          imageNames: uploadedImages.map((image) => image.name),
+          imageIds: uploadedImages.map((image) => image.uploadId),
         }),
       });
 
+      setActiveRunId(agentRun.id);
       setApiStatus(`Agent Run: ${agentRun.id}`);
-
-      const pollTimer = setInterval(async () => {
-        try {
-          const latestRun = await apiRequest(`/agent/runs/${encodeURIComponent(agentRun.id)}`, {
-            authToken: auth?.token,
-          });
-          const syncedScenes = latestRun.scenes.length > 0
-            ? latestRun.scenes.map((scene) => ({
-                ...scene,
-                status: scene.status === 'completed'
-                  ? 'done'
-                  : scene.status === 'generating'
-                    ? 'active'
-                    : scene.status === 'failed'
-                      ? 'failed'
-                      : 'queued',
-              }))
-            : scenesRef.current;
-          const isFinished = ['completed', 'failed'].includes(latestRun.status);
-
-          scenesRef.current = syncedScenes;
-          setScenes(syncedScenes);
-          setProgress(latestRun.progress ?? progress);
-          setApiStatus(`Agent: ${latestRun.stage}`);
-          if (latestRun.error) setApiError(latestRun.error);
-
-          if (isFinished) {
-            clearInterval(pollTimer);
-            clearInterval(stageTimer);
-            setStageIndex(agentStages.length - 1);
-            setIsGenerating(false);
-            if (latestRun.finalVideoUrl) {
-              setFinalVideoUrl(latestRun.finalVideoUrl);
-              setProgress(100);
-            }
-          }
-        } catch (error) {
-          clearInterval(pollTimer);
-          clearInterval(stageTimer);
-          setApiError(error.message);
-          setIsGenerating(false);
-        }
-      });
-
-      timers.current = [stageTimer, pollTimer];
+      syncAgentRun(agentRun);
+      timers.current = [setTimeout(() => pollAgentRun(agentRun.id), 400)];
     } catch (error) {
-      clearInterval(stageTimer);
+      clearTaskTimers();
       setApiError(error.message);
+      setRunStatus('failed');
       setIsGenerating(false);
       setScenes(placeholderScenes.map((scene) => ({ ...scene, status: 'failed', error: error.message })));
     }
+  }
+
+  function selectCandidate(candidateId) {
+    const candidate = candidates.find((item) => item.id === candidateId);
+    if (!candidate) return;
+    setSelectedCandidateId(candidateId);
+    const editableScenes = candidate.scenes.map((scene) => ({ ...scene, status: 'locked', progress: 0 }));
+    scenesRef.current = editableScenes;
+    setScenes(editableScenes);
+  }
+
+  function updateDraftScene(index, field, value) {
+    setScenes((current) => current.map((scene, sceneIndex) => (
+      sceneIndex === index ? { ...scene, [field]: value } : scene
+    )));
+  }
+
+  async function handleConfirmStoryboard() {
+    if (!activeRunId || !selectedCandidateId || isConfirming) return;
+    setIsConfirming(true);
+    setIsGenerating(true);
+    setApiError('');
+
+    try {
+      const confirmedRun = await apiRequest(
+        `/agent/runs/${encodeURIComponent(activeRunId)}/confirm`,
+        {
+          method: 'POST',
+          authToken: auth?.token,
+          body: JSON.stringify({
+            candidateId: selectedCandidateId,
+            scenes: scenes.map((scene) => ({
+              title: scene.title,
+              prompt: scene.prompt,
+              duration: scene.duration,
+            })),
+          }),
+        },
+      );
+      syncAgentRun(confirmedRun);
+      timers.current = [setTimeout(() => pollAgentRun(activeRunId), 400)];
+    } catch (error) {
+      setApiError(error.message);
+      setRunStatus('awaiting_confirmation');
+      setIsGenerating(false);
+    } finally {
+      setIsConfirming(false);
+    }
+  }
+
+  function resetWorkspace() {
+    clearTaskTimers();
+    images.forEach((image) => {
+      URL.revokeObjectURL(image.url);
+      imageUrls.current.delete(image.url);
+    });
+    const draftScenes = createScenes(180, defaultIdea, '电影感', 15);
+    scenesRef.current = draftScenes;
+    setIdea(defaultIdea);
+    setDuration(180);
+    setSegmentDuration(15);
+    setStyle('电影感');
+    setRatio('16:9');
+    setImages([]);
+    setScenes(draftScenes);
+    setCandidates([]);
+    setSelectedCandidateId('');
+    setActiveRunId('');
+    setIsGenerating(false);
+    setIsConfirming(false);
+    setStageIndex(0);
+    setProgress(0);
+    setApiError('');
+    setFinalVideoUrl('');
+    setRunStatus('idle');
+    setApiStatus('Agent Endpoint: healthy');
   }
 
   return (
     <div className="workspace-shell">
       <header className="app-header">
         <div className="brand-mark">
-          <Film size={20} />
+          <BrandLogo />
           <span>Dreamina Studio</span>
         </div>
         <div className="header-actions">
@@ -1463,7 +1675,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
               管理后台
             </button>
           ) : null}
-          <button className="icon-button" title="新建项目">
+          <button className="icon-button" title="新建项目" onClick={resetWorkspace}>
             <Plus size={18} />
           </button>
           <button className="icon-button" title="设置">
@@ -1479,7 +1691,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
         <aside className="history-rail">
           <div className="rail-section">
             <p className="rail-label">项目</p>
-            <button className="rail-primary">
+            <button className="rail-primary" onClick={resetWorkspace}>
               <WandSparkles size={16} />
               新创作
             </button>
@@ -1516,12 +1728,13 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
               value={idea}
               onChange={(event) => setIdea(event.target.value)}
               placeholder="描述你想制作的视频，可以很粗略。"
+              disabled={runLocked}
             />
           </label>
 
           <div className="upload-strip">
             <label className="upload-drop">
-              <input type="file" accept="image/*" multiple onChange={handleImageUpload} />
+              <input type="file" accept="image/*" multiple onChange={handleImageUpload} disabled={runLocked} />
               <UploadCloud size={20} />
               <span>上传参考图片</span>
             </label>
@@ -1550,11 +1763,36 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                   className={duration === option.value ? 'selected' : ''}
                   key={option.value}
                   onClick={() => setDuration(option.value)}
+                  disabled={runLocked}
                 >
                   <strong>{option.label}</strong>
-                  <small>{option.scenes}段</small>
+                  <small>{Math.ceil(option.value / segmentDuration)}段</small>
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className="control-group">
+            <div className="control-head">
+              <Scissors size={16} />
+              <span>单段时长</span>
+            </div>
+            <div className="segmented-control segment-duration-control">
+              {segmentDurationOptions.map((option) => {
+                const exceedsLimit = Math.ceil(duration / option) > 40;
+                return (
+                  <button
+                    className={segmentDuration === option ? 'selected' : ''}
+                    key={option}
+                    onClick={() => setSegmentDuration(option)}
+                    disabled={runLocked || exceedsLimit}
+                    title={exceedsLimit ? '该总时长最多支持 40 段，请选择更长的单段时长' : ''}
+                  >
+                    <strong>{option}秒</strong>
+                    <small>{Math.ceil(duration / option)}段</small>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -1570,6 +1808,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                     className={style === option ? 'selected' : ''}
                     key={option}
                     onClick={() => setStyle(option)}
+                    disabled={runLocked}
                   >
                     {option}
                   </button>
@@ -1588,6 +1827,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                     className={ratio === option ? 'selected' : ''}
                     key={option}
                     onClick={() => setRatio(option)}
+                    disabled={runLocked}
                   >
                     {option}
                   </button>
@@ -1611,14 +1851,22 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
             </div>
           </div>
 
-          <button className="submit-button" onClick={handleSubmit} disabled={!idea.trim()}>
+          <button className="submit-button" onClick={handleSubmit} disabled={!idea.trim() || runLocked}>
             {isGenerating ? <Loader2 className="spin" size={18} /> : <WandSparkles size={18} />}
-            {isGenerating ? '生成中' : '开始生成'}
+            {isGenerating
+              ? runStatus === 'generating' ? '即梦生成中' : 'DeepSeek 编写中'
+              : runStatus === 'awaiting_confirmation' ? '请先确认分镜' : '生成三套候选分镜'}
           </button>
           {apiError ? (
             <div className="api-error">
               <AlertTriangle size={15} />
               <span>{apiError}</span>
+            </div>
+          ) : null}
+          {runStatus === 'completed' && finalVideoUrl ? (
+            <div className="api-success" aria-live="polite">
+              <BadgeCheck size={16} />
+              <span>即梦 CLI 已完成所有分镜，视频片段结果已返回。</span>
             </div>
           ) : null}
         </section>
@@ -1639,11 +1887,19 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                 <img className="preview-image" src={visualAssets.workspacePreview} alt="" loading="lazy" />
               )}
               <div className="video-shine" />
-              <button className="play-ring compact" title="播放预览">
-                <Play size={22} fill="currentColor" />
-              </button>
+              {!finalVideoUrl ? (
+                <button className="play-ring compact" title="等待生成结果" disabled>
+                  <Play size={22} fill="currentColor" />
+                </button>
+              ) : null}
               <div className="preview-caption">
-                <strong>{finalVideoUrl ? '服务器已合成预览' : isGenerating ? '片段生成中' : '等待最新任务'}</strong>
+                <strong>
+                  {finalVideoUrl
+                    ? '首段视频预览'
+                    : runStatus === 'awaiting_confirmation'
+                      ? '等待确认分镜'
+                      : isGenerating ? '任务处理中' : '等待最新任务'}
+                </strong>
                 <span>{completeCount}/{scenes.length} 段完成</span>
               </div>
             </div>
@@ -1713,6 +1969,12 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                 <div className="mini-progress">
                   <span style={{ width: `${scene.progress}%` }} />
                 </div>
+                {scene.videoUrl ? (
+                  <a className="scene-result-link" href={scene.videoUrl} target="_blank" rel="noreferrer">
+                    <Play size={13} />
+                    查看生成片段
+                  </a>
+                ) : null}
               </div>
               <div className="scene-time">{scene.time}</div>
             </article>

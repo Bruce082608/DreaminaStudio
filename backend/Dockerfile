@@ -11,7 +11,11 @@ WORKDIR /app
 # Install system dependencies if needed (e.g., git or curl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global jimeng-cli@0.3.9
 
 # Copy the requirements file into the container
 COPY requirements.txt .

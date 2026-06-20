@@ -1,11 +1,25 @@
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
+import os
 import random
+import secrets
 import time
-from typing import Dict, List, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
+import httpx
 from pydantic import BaseModel, Field
+
+try:
+    from .jimeng_cli import JimengCliError, cli_public_status, generate_video
+except ImportError:
+    from jimeng_cli import JimengCliError, cli_public_status, generate_video
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -50,7 +64,7 @@ class Character(BaseModel):
 
 class Shot(BaseModel):
     id: str
-    characterIds: List[str] = []
+    characterIds: List[str] = Field(default_factory=list)
     prompt: str
     duration: int = 8
     engine: str = "jimeng"
@@ -66,6 +80,138 @@ class CompileParams(BaseModel):
     voiceVolume: int = 80
     totalDuration: int = 60
     shotIds: List[str]
+
+class UserRecord(BaseModel):
+    id: str
+    name: str
+    email: str
+    passwordHash: str
+    role: str = "user"
+    status: str = "active"
+    createdAt: float
+    lastLoginAt: Optional[float] = None
+    loginCount: int = 0
+
+class PublicUser(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str
+    status: str
+    createdAt: float
+    lastLoginAt: Optional[float] = None
+    loginCount: int = 0
+
+class AuthPayload(BaseModel):
+    email: str
+    password: str
+
+class RegisterPayload(AuthPayload):
+    name: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user: PublicUser
+
+class AgentSettings(BaseModel):
+    deepseekBaseUrl: str = "https://api.deepseek.com"
+    deepseekModel: str = "deepseek-v4-flash"
+    deepseekApiKey: Optional[str] = None
+    jimengMode: str = "cli"
+    jimengApiUrl: Optional[str] = None
+    jimengModel: str = "jimeng-video-seedance-2.0"
+    jimengRegion: str = "cn"
+    updatedAt: Optional[float] = None
+
+class AgentSettingsUpdate(BaseModel):
+    deepseekBaseUrl: str = "https://api.deepseek.com"
+    deepseekModel: str = "deepseek-v4-flash"
+    deepseekApiKey: Optional[str] = None
+    jimengMode: str = "cli"
+    jimengApiUrl: Optional[str] = None
+    jimengModel: str = "jimeng-video-seedance-2.0"
+    jimengRegion: str = "cn"
+
+class AgentSettingsPublic(BaseModel):
+    deepseekBaseUrl: str
+    deepseekModel: str
+    deepseekApiKeySet: bool
+    jimengMode: str
+    jimengApiUrl: Optional[str] = None
+    jimengModel: str
+    jimengRegion: str
+    jimengCliAvailable: bool = False
+    jimengTokenPoolConfigured: bool = False
+    updatedAt: Optional[float] = None
+
+class AgentCreatePayload(BaseModel):
+    idea: str
+    duration: int = Field(default=180, ge=15, le=600)
+    segmentDuration: int = Field(default=10, ge=4, le=15)
+    style: str = "电影感"
+    ratio: str = "16:9"
+    imageNames: List[str] = Field(default_factory=list)
+    imageIds: List[str] = Field(default_factory=list, max_length=9)
+
+class AgentRunScene(BaseModel):
+    id: str
+    number: str
+    time: str
+    title: str
+    prompt: str
+    duration: int
+    status: str = "queued"
+    progress: int = 0
+    videoUrl: Optional[str] = None
+    error: Optional[str] = None
+
+class AgentStoryboardCandidate(BaseModel):
+    id: str
+    title: str
+    summary: str
+    scenes: List[AgentRunScene] = Field(default_factory=list)
+
+class AgentSceneEdit(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=10, max_length=8000)
+    duration: int = Field(ge=4, le=15)
+
+class AgentConfirmPayload(BaseModel):
+    candidateId: str
+    scenes: List[AgentSceneEdit] = Field(min_length=1, max_length=150)
+
+class AgentUploadResponse(BaseModel):
+    id: str
+    name: str
+
+class AgentRun(BaseModel):
+    id: str
+    userId: str
+    userEmail: str
+    status: str = "queued"
+    stage: str = "queued"
+    progress: int = 0
+    idea: str
+    duration: int
+    segmentDuration: int = 10
+    style: str
+    ratio: str
+    imageNames: List[str] = Field(default_factory=list)
+    imageIds: List[str] = Field(default_factory=list)
+    candidates: List[AgentStoryboardCandidate] = Field(default_factory=list)
+    selectedCandidateId: Optional[str] = None
+    scenes: List[AgentRunScene] = Field(default_factory=list)
+    finalVideoUrl: Optional[str] = None
+    error: Optional[str] = None
+    agentModel: str = "deepseek-v4-flash"
+    createdAt: float
+    updatedAt: float
+
+class UploadedReference(BaseModel):
+    id: str
+    userId: str
+    name: str
+    path: str
 
 # ==========================================
 # In-Memory Database / State
@@ -93,6 +239,16 @@ cookie_pool: Dict[str, Cookie] = {
 shots_db: Dict[str, Shot] = {}
 task_queue: asyncio.Queue = asyncio.Queue()
 active_workers = []
+agent_runs: Dict[str, AgentRun] = {}
+uploaded_references: Dict[str, UploadedReference] = {}
+DATA_DIR = Path(__file__).resolve().parent / "data"
+USERS_FILE = DATA_DIR / "users.json"
+SETTINGS_FILE = DATA_DIR / "agent_settings.json"
+UPLOADS_DIR = DATA_DIR / "uploads"
+OUTPUTS_DIR = DATA_DIR / "outputs"
+DEFAULT_ADMIN_EMAIL = os.getenv("DREAMINA_ADMIN_EMAIL", "admin@dreamina.local").lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("DREAMINA_ADMIN_PASSWORD", "Dreamina@2026")
+AUTH_SECRET = os.getenv("DREAMINA_AUTH_SECRET", "dreamina-studio-local-dev-secret")
 
 # Mock Video URLs
 MOCK_VIDEOS = [
@@ -101,6 +257,520 @@ MOCK_VIDEOS = [
     "https://assets.mixkit.co/videos/preview/mixkit-steaming-cup-of-coffee-close-up-41713-large.mp4",
     "https://assets.mixkit.co/videos/preview/mixkit-freshly-brewed-coffee-dripping-into-a-pot-41714-large.mp4"
 ]
+MOCK_GENERATION_STEP_SECONDS = float(os.getenv("DREAMINA_MOCK_STEP_SECONDS", "0.4"))
+MOCK_GENERATION_ERROR_RATE = float(os.getenv("DREAMINA_MOCK_ERROR_RATE", "0"))
+
+# ==========================================
+# User Auth Helpers
+# ==========================================
+
+def hash_password(password: str, salt: Optional[str] = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    iterations = 120000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations)
+    encoded_digest = base64.b64encode(digest).decode("ascii")
+    return f"pbkdf2_sha256${iterations}${salt}${encoded_digest}"
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected_digest = password_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        )
+        actual_digest = base64.b64encode(digest).decode("ascii")
+        return secrets.compare_digest(actual_digest, expected_digest)
+    except ValueError:
+        return False
+
+def encode_base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+def decode_base64url(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}")
+
+def create_auth_token(email: str) -> str:
+    payload = {
+        "email": email.lower(),
+        "iat": time.time(),
+        "nonce": secrets.token_hex(8),
+    }
+    encoded_payload = encode_base64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(AUTH_SECRET.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256).digest()
+    return f"{encoded_payload}.{encode_base64url(signature)}"
+
+def parse_auth_token(token: str) -> str:
+    try:
+        encoded_payload, encoded_signature = token.split(".", 1)
+        expected_signature = hmac.new(
+            AUTH_SECRET.encode("utf-8"),
+            encoded_payload.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        actual_signature = decode_base64url(encoded_signature)
+        if not hmac.compare_digest(actual_signature, expected_signature):
+            raise ValueError("Invalid signature")
+
+        payload = json.loads(decode_base64url(encoded_payload).decode("utf-8"))
+        return str(payload["email"]).lower()
+    except (KeyError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="Invalid or expired session") from None
+
+def user_to_public(user: UserRecord) -> PublicUser:
+    return PublicUser(**user.model_dump(exclude={"passwordHash"}))
+
+def load_users() -> Dict[str, UserRecord]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not USERS_FILE.exists():
+        return {}
+
+    with USERS_FILE.open("r", encoding="utf-8-sig") as file:
+        raw_users = json.load(file)
+
+    return {email.lower(): UserRecord(**data) for email, data in raw_users.items()}
+
+def save_users(users: Dict[str, UserRecord]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    serialized = {email: jsonable_encoder(user) for email, user in users.items()}
+    with USERS_FILE.open("w", encoding="utf-8") as file:
+        json.dump(serialized, file, ensure_ascii=False, indent=2)
+
+def ensure_default_admin() -> None:
+    users = load_users()
+    if DEFAULT_ADMIN_EMAIL in users:
+        return
+
+    users[DEFAULT_ADMIN_EMAIL] = UserRecord(
+        id=f"user-{secrets.token_hex(8)}",
+        name="Dreamina 管理员",
+        email=DEFAULT_ADMIN_EMAIL,
+        passwordHash=hash_password(DEFAULT_ADMIN_PASSWORD),
+        role="admin",
+        status="active",
+        createdAt=time.time(),
+    )
+    save_users(users)
+    logger.info("Default admin user created: %s", DEFAULT_ADMIN_EMAIL)
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> UserRecord:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    email = parse_auth_token(token)
+
+    user = load_users().get(email)
+    if not user or user.status != "active":
+        raise HTTPException(status_code=401, detail="User is not active")
+
+    return user
+
+def require_admin(current_user: UserRecord = Depends(get_current_user)) -> UserRecord:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+def load_agent_settings() -> AgentSettings:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not SETTINGS_FILE.exists():
+        return AgentSettings(deepseekApiKey=os.getenv("DEEPSEEK_API_KEY"))
+
+    with SETTINGS_FILE.open("r", encoding="utf-8-sig") as file:
+        settings = AgentSettings(**json.load(file))
+    if not settings.deepseekApiKey:
+        settings.deepseekApiKey = os.getenv("DEEPSEEK_API_KEY")
+    return settings
+
+def save_agent_settings(settings: AgentSettings) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with SETTINGS_FILE.open("w", encoding="utf-8") as file:
+        json.dump(jsonable_encoder(settings), file, ensure_ascii=False, indent=2)
+
+def agent_settings_to_public(settings: AgentSettings) -> AgentSettingsPublic:
+    cli_status = cli_public_status()
+    return AgentSettingsPublic(
+        deepseekBaseUrl=settings.deepseekBaseUrl,
+        deepseekModel=settings.deepseekModel,
+        deepseekApiKeySet=bool(settings.deepseekApiKey),
+        jimengMode=settings.jimengMode,
+        jimengApiUrl=settings.jimengApiUrl,
+        jimengModel=settings.jimengModel,
+        jimengRegion=settings.jimengRegion,
+        jimengCliAvailable=cli_status["available"],
+        jimengTokenPoolConfigured=cli_status["tokenPoolConfigured"],
+        updatedAt=settings.updatedAt,
+    )
+
+def format_time(seconds: int) -> str:
+    minutes = seconds // 60
+    remaining_seconds = seconds % 60
+    return f"{minutes}:{remaining_seconds:02d}"
+
+def get_scene_durations(payload: AgentCreatePayload) -> List[int]:
+    count = max((payload.duration + payload.segmentDuration - 1) // payload.segmentDuration, 1)
+    durations = [payload.segmentDuration] * count
+    durations[-1] = payload.duration - payload.segmentDuration * (count - 1)
+    if len(durations) > 1 and durations[-1] < 4:
+        combined = durations[-2] + durations[-1]
+        durations[-2] = combined // 2
+        durations[-1] = combined - durations[-2]
+    return durations
+
+def fallback_candidates(payload: AgentCreatePayload, run_id: str) -> List[AgentStoryboardCandidate]:
+    titles = [
+        "开场氛围建立",
+        "主角动机显现",
+        "关键线索出现",
+        "空间关系推进",
+        "情绪转折",
+        "动作段落展开",
+        "冲突升级",
+        "视觉高潮",
+        "尾声与回响",
+    ]
+    variants = [
+        ("叙事推进版", "强调事件因果、人物行动和清晰转折"),
+        ("情绪电影版", "强调环境氛围、表演细节和情绪递进"),
+        ("视觉节奏版", "强调镜头变化、动作节奏和视觉记忆点"),
+    ]
+    candidates = []
+    for candidate_index, (candidate_title, direction) in enumerate(variants, start=1):
+        scenes = []
+        start = 0
+        for scene_index, scene_duration in enumerate(get_scene_durations(payload)):
+            end = start + scene_duration
+            reference_note = (
+                "使用上传参考图保持人物一致，不描述人物衣物服装。"
+                if payload.imageIds
+                else "完整描述人物外观、环境和关键视觉特征。"
+            )
+            scenes.append(
+                AgentRunScene(
+                    id=f"{run_id}-c{candidate_index}-scene-{scene_index + 1}",
+                    number=str(scene_index + 1).zfill(2),
+                    time=f"{format_time(start)} - {format_time(end)}",
+                    title=titles[scene_index % len(titles)],
+                    duration=scene_duration,
+                    prompt=(
+                        f"{payload.style}式分镜，{payload.ratio}，{direction}。{reference_note}"
+                        f"本段必须独立描述画面主体、动作或对话、环境、光线、情绪和运镜。"
+                        f"剧本内容：{payload.idea}"
+                    ),
+                )
+            )
+            start = end
+        candidates.append(
+            AgentStoryboardCandidate(
+                id=f"{run_id}-candidate-{candidate_index}",
+                title=candidate_title,
+                summary=direction,
+                scenes=scenes,
+            )
+        )
+    return candidates
+
+def extract_json_object(text: str) -> Dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Agent response did not contain JSON")
+
+    return json.loads(cleaned[start : end + 1])
+
+def build_deepseek_prompt(payload: AgentCreatePayload, candidate_index: int) -> str:
+    scene_durations = get_scene_durations(payload)
+    reference_rule = (
+        "有参考图片。不要对人物进行任何衣物、服装、配饰上的描述；"
+        "只需用‘参考图中的人物’指代，并保持人物一致。"
+        if payload.imageIds
+        else "没有参考图片，需要完整描述人物的稳定视觉特征。"
+    )
+    candidate_directions = [
+        "方案一：叙事清晰，强调事件因果、角色动机和戏剧转折。",
+        "方案二：情绪浓郁，强调表演细节、环境氛围和电影感。",
+        "方案三：视觉大胆，强调动作节奏、运镜变化和记忆点。",
+    ]
+    return f"""【基础设定】
+我将使用即梦seedance2.0模型制作一个总长{payload.duration}秒的分段长视频，请你按照要求生成详细的提示词剧本，并可适当补充细节（人物对话、人物动作等，但必须包含我说的内容）。
+
+【画面分镜风格】
+使用{payload.style}式的分镜剧本，画幅为{payload.ratio}。{reference_rule}
+每一段分镜目标时长为{payload.segmentDuration}秒，本次各段实际时长依次为：{scene_durations}秒。
+需要考虑到视频生成模型无法看到上一段提示词，所以每一段之间应完全独立描述，重复写清人物、场景、时间、光线和必要的连续性信息。如有角色，则在剧本中跟随角色的动作或对话描述运镜。
+
+【剧本描述】
+{payload.idea}
+
+【本候选方向】
+{candidate_directions[candidate_index - 1]}
+
+只输出 JSON，不要输出 Markdown 或解释。JSON 格式：
+{{"title":"候选剧本标题","summary":"一句话说明本方案特点","scenes":[{{"title":"分镜标题","prompt":"可直接提交给即梦 Seedance 2.0 的完整独立提示词"}}]}}
+scenes 必须严格输出 {len(scene_durations)} 段。"""
+
+async def plan_candidate_with_deepseek(
+    payload: AgentCreatePayload,
+    run_id: str,
+    settings: AgentSettings,
+    candidate_index: int,
+) -> AgentStoryboardCandidate:
+    if not settings.deepseekApiKey:
+        raise RuntimeError("管理员尚未配置 DeepSeek API Key")
+    system_prompt = (
+        "你是专业的视频分镜编剧。你只负责写详细、可编辑、可直接交给即梦 Seedance 2.0 的分镜剧本，"
+        "不负责生成视频，也不执行任何外部工具。必须输出合法 JSON。"
+    )
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{settings.deepseekBaseUrl.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.deepseekApiKey}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.deepseekModel,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": build_deepseek_prompt(payload, candidate_index)},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.85,
+                "stream": False,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    content = data["choices"][0]["message"]["content"]
+    planned = extract_json_object(content)
+    raw_scenes = planned.get("scenes") or []
+    scene_durations = get_scene_durations(payload)
+    if len(raw_scenes) != len(scene_durations):
+        raise RuntimeError(
+            f"DeepSeek 候选 {candidate_index} 返回了 {len(raw_scenes)} 段，预期 {len(scene_durations)} 段"
+        )
+
+    scenes = []
+    start = 0
+    for index, (scene, scene_duration) in enumerate(zip(raw_scenes, scene_durations)):
+        end = start + scene_duration
+        scenes.append(
+            AgentRunScene(
+                id=f"{run_id}-c{candidate_index}-scene-{index + 1}",
+                number=str(index + 1).zfill(2),
+                time=f"{format_time(start)} - {format_time(end)}",
+                title=str(scene.get("title") or f"分镜 {index + 1}"),
+                duration=scene_duration,
+                prompt=str(scene.get("prompt") or "").strip(),
+            )
+        )
+        start = end
+
+    if any(len(scene.prompt) < 10 for scene in scenes):
+        raise RuntimeError(f"DeepSeek 候选 {candidate_index} 包含空白或过短的分镜提示词")
+    return AgentStoryboardCandidate(
+        id=f"{run_id}-candidate-{candidate_index}",
+        title=str(planned.get("title") or f"候选剧本 {candidate_index}"),
+        summary=str(planned.get("summary") or "可编辑的 Seedance 2.0 分镜方案"),
+        scenes=scenes,
+    )
+
+async def build_scene_plan(
+    payload: AgentCreatePayload,
+    run_id: str,
+    settings: AgentSettings,
+) -> tuple[List[AgentStoryboardCandidate], str]:
+    if not settings.deepseekApiKey:
+        if settings.jimengMode == "mock":
+            return fallback_candidates(payload, run_id), "local-storyboard"
+        raise RuntimeError("管理员尚未配置 DeepSeek API Key")
+
+    try:
+        candidates = []
+        for candidate_index in range(1, 4):
+            candidates.append(
+                await plan_candidate_with_deepseek(payload, run_id, settings, candidate_index)
+            )
+        return candidates, settings.deepseekModel
+    except Exception as exc:
+        raise RuntimeError(f"DeepSeek Agent 请求失败：{exc}") from exc
+
+def sync_run_from_shots(run: AgentRun) -> AgentRun:
+    if not run.scenes:
+        return run
+
+    synced_scenes = []
+    for scene in run.scenes:
+        shot = shots_db.get(scene.id)
+        if shot:
+            scene.status = backend_status_to_agent_status(shot.status)
+            scene.progress = shot.progress
+            scene.videoUrl = shot.videoUrl
+            scene.error = shot.error
+        synced_scenes.append(scene)
+
+    run.scenes = synced_scenes
+    if run.status in {"generating", "completed"}:
+        total_progress = sum(scene.progress for scene in run.scenes)
+        scene_progress = round(total_progress / max(len(run.scenes), 1))
+        run.progress = min(95, 20 + round(scene_progress * 0.75))
+        if any(scene.status == "generating" for scene in run.scenes):
+            run.stage = "jimeng_generating"
+        if all(scene.status in {"completed", "failed"} for scene in run.scenes):
+            completed_scenes = [scene for scene in run.scenes if scene.status == "completed" and scene.videoUrl]
+            run.status = "completed" if completed_scenes else "failed"
+            run.stage = "completed" if completed_scenes else "failed"
+            run.progress = 100 if completed_scenes else run.progress
+            run.finalVideoUrl = completed_scenes[0].videoUrl if completed_scenes else None
+            if not completed_scenes:
+                run.error = "所有即梦分镜任务均未成功生成"
+    run.updatedAt = time.time()
+    agent_runs[run.id] = run
+    return run
+
+def backend_status_to_agent_status(status: str) -> str:
+    return {
+        "idle": "queued",
+        "waiting": "queued",
+        "generating": "generating",
+        "completed": "completed",
+        "failed": "failed",
+    }.get(status, status)
+
+async def process_agent_run(run_id: str) -> None:
+    run = agent_runs.get(run_id)
+    if not run:
+        return
+
+    payload = AgentCreatePayload(
+        idea=run.idea,
+        duration=run.duration,
+        segmentDuration=run.segmentDuration,
+        style=run.style,
+        ratio=run.ratio,
+        imageNames=run.imageNames,
+        imageIds=run.imageIds,
+    )
+
+    try:
+        settings = load_agent_settings()
+        run.status = "planning"
+        run.stage = "deepseek_planning" if settings.deepseekApiKey else "local_planning"
+        run.progress = 8
+        run.updatedAt = time.time()
+        agent_runs[run_id] = run
+
+        candidates, planner_model = await build_scene_plan(payload, run_id, settings)
+        run.agentModel = planner_model
+        run.candidates = candidates
+        run.status = "awaiting_confirmation"
+        run.stage = "awaiting_confirmation"
+        run.progress = 20
+        run.updatedAt = time.time()
+        agent_runs[run_id] = run
+        logger.info("Agent run %s created %s editable storyboard candidates.", run_id, len(candidates))
+    except Exception as exc:
+        run.status = "failed"
+        run.stage = "failed"
+        run.error = str(exc)
+        run.progress = 0
+        run.updatedAt = time.time()
+        agent_runs[run_id] = run
+        logger.exception("Agent run %s failed: %s", run_id, exc)
+
+def get_run_reference_paths(run: AgentRun) -> List[Path]:
+    paths = []
+    for image_id in run.imageIds:
+        reference = uploaded_references.get(image_id)
+        if reference and reference.userId == run.userId:
+            paths.append(Path(reference.path))
+    return paths
+
+async def process_confirmed_run(run_id: str) -> None:
+    run = agent_runs.get(run_id)
+    if not run:
+        return
+
+    try:
+        settings = load_agent_settings()
+        reference_paths = get_run_reference_paths(run)
+        run.status = "generating"
+        run.stage = "jimeng_dispatch"
+        run.progress = 20
+        run.error = None
+        run.updatedAt = time.time()
+
+        for scene in run.scenes:
+            shots_db[scene.id] = Shot(
+                id=scene.id,
+                prompt=scene.prompt,
+                duration=scene.duration,
+                engine="jimeng",
+                status="waiting",
+                progress=0,
+                caption=f"{scene.title} / {run.ratio}",
+            )
+        agent_runs[run_id] = run
+
+        for scene in run.scenes:
+            shot = shots_db[scene.id]
+            shot.status = "generating"
+            shot.progress = 5
+            run.stage = "jimeng_generating"
+            run.updatedAt = time.time()
+            sync_run_from_shots(run)
+
+            try:
+                if settings.jimengMode == "mock":
+                    await simulate_video_generation(scene.id, None)
+                elif settings.jimengMode == "cli":
+                    reference_instruction = ""
+                    if reference_paths:
+                        slots = "、".join(f"@image_file_{index}" for index in range(1, len(reference_paths) + 1))
+                        reference_instruction = f"使用参考图片 {slots} 保持角色与场景一致。"
+                    result = await generate_video(
+                        prompt=f"{reference_instruction}{scene.prompt}",
+                        duration=scene.duration,
+                        ratio=run.ratio,
+                        model=settings.jimengModel,
+                        region=settings.jimengRegion,
+                        output_dir=OUTPUTS_DIR / run.id / scene.id,
+                        reference_paths=reference_paths,
+                    )
+                    shot.videoUrl = result.video_url
+                    shot.progress = 100
+                    shot.status = "completed"
+                else:
+                    raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
+            except (JimengCliError, RuntimeError) as exc:
+                shot.status = "failed"
+                shot.progress = 0
+                shot.error = str(exc)
+                logger.exception("Jimeng scene %s failed: %s", scene.id, exc)
+
+            sync_run_from_shots(run)
+
+        sync_run_from_shots(run)
+        logger.info("Agent run %s finished sequential Jimeng generation.", run_id)
+    except Exception as exc:
+        run.status = "failed"
+        run.stage = "failed"
+        run.error = str(exc)
+        run.updatedAt = time.time()
+        agent_runs[run_id] = run
+        logger.exception("Confirmed Agent run %s failed: %s", run_id, exc)
 
 # ==========================================
 # Background Generation Worker
@@ -121,7 +791,7 @@ async def simulate_video_generation(shot_id: str, cookie_id: Optional[str]):
         shot.error = None
         
         total_steps = 10
-        delay_per_step = 1.0  # seconds
+        delay_per_step = max(MOCK_GENERATION_STEP_SECONDS, 0.01)
 
         # Simulate rendering progress
         for i in range(1, total_steps + 1):
@@ -130,7 +800,7 @@ async def simulate_video_generation(shot_id: str, cookie_id: Optional[str]):
             logger.info(f"Shot {shot_id} progress: {shot.progress}%")
 
         # Determine success/failure based on mock error rates
-        error_rate = 0.05 if shot.engine == "jimeng" else (0.10 if shot.engine == "kling" else 0.20)
+        error_rate = min(max(MOCK_GENERATION_ERROR_RATE, 0), 1)
         is_success = random.random() > error_rate
 
         if is_success:
@@ -230,6 +900,7 @@ async def queue_worker():
 
 @app.on_event("startup")
 async def startup_event():
+    ensure_default_admin()
     # Start background task queue worker
     worker_task = asyncio.create_task(queue_worker())
     active_workers.append(worker_task)
@@ -244,6 +915,262 @@ async def shutdown_event():
 # REST API Routes
 # ==========================================
 
+@app.post("/auth/register", response_model=AuthResponse)
+def register_user(payload: RegisterPayload):
+    email = payload.email.strip().lower()
+    name = payload.name.strip()
+
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Name must be at least 2 characters")
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Please enter a valid email")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    users = load_users()
+    if email in users:
+        raise HTTPException(status_code=400, detail="Email is already registered")
+
+    user = UserRecord(
+        id=f"user-{secrets.token_hex(8)}",
+        name=name,
+        email=email,
+        passwordHash=hash_password(payload.password),
+        role="user",
+        status="active",
+        createdAt=time.time(),
+        lastLoginAt=time.time(),
+        loginCount=1,
+    )
+    users[email] = user
+    save_users(users)
+
+    return AuthResponse(token=create_auth_token(email), user=user_to_public(user))
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login_user(payload: AuthPayload):
+    email = payload.email.strip().lower()
+    users = load_users()
+    user = users.get(email)
+
+    if not user or not verify_password(payload.password, user.passwordHash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.status != "active":
+        raise HTTPException(status_code=403, detail="User has been disabled")
+
+    user.lastLoginAt = time.time()
+    user.loginCount += 1
+    users[email] = user
+    save_users(users)
+
+    return AuthResponse(token=create_auth_token(email), user=user_to_public(user))
+
+@app.get("/auth/me", response_model=PublicUser)
+def get_me(current_user: UserRecord = Depends(get_current_user)):
+    return user_to_public(current_user)
+
+@app.get("/admin/users", response_model=List[PublicUser])
+def get_users(_: UserRecord = Depends(require_admin)):
+    users = load_users()
+    return sorted(
+        [user_to_public(user) for user in users.values()],
+        key=lambda user: user.createdAt,
+        reverse=True,
+    )
+
+@app.get("/admin/stats")
+def get_admin_stats(_: UserRecord = Depends(require_admin)):
+    users = list(load_users().values())
+    active_users = [user for user in users if user.status == "active"]
+    recent_logins = [user for user in users if user.lastLoginAt and time.time() - user.lastLoginAt < 86400 * 7]
+    active_agent_runs = [
+        run for run in agent_runs.values()
+        if run.status in {"queued", "planning", "awaiting_confirmation", "generating"}
+    ]
+    failed_agent_runs = [run for run in agent_runs.values() if run.status == "failed"]
+
+    return {
+        "totalUsers": len(users),
+        "activeUsers": len(active_users),
+        "recentLogins": len(recent_logins),
+        "adminUsers": len([user for user in users if user.role == "admin"]),
+        "generatedShots": len(shots_db),
+        "queueSize": task_queue.qsize(),
+        "agentRuns": len(agent_runs),
+        "activeAgentRuns": len(active_agent_runs),
+        "failedAgentRuns": len(failed_agent_runs),
+    }
+
+@app.get("/admin/agent/config", response_model=AgentSettingsPublic)
+def get_agent_config(_: UserRecord = Depends(require_admin)):
+    return agent_settings_to_public(load_agent_settings())
+
+@app.put("/admin/agent/config", response_model=AgentSettingsPublic)
+def update_agent_config(payload: AgentSettingsUpdate, _: UserRecord = Depends(require_admin)):
+    current = load_agent_settings()
+    next_key = payload.deepseekApiKey.strip() if payload.deepseekApiKey else current.deepseekApiKey
+
+    jimeng_mode = payload.jimengMode.strip().lower()
+    if jimeng_mode not in {"cli", "mock"}:
+        raise HTTPException(status_code=400, detail="即梦接入模式仅支持 cli 或 mock")
+    jimeng_region = payload.jimengRegion.strip().lower()
+    if jimeng_region not in {"cn", "us", "hk", "jp", "sg"}:
+        raise HTTPException(status_code=400, detail="不支持的即梦区域")
+
+    settings = AgentSettings(
+        deepseekBaseUrl=payload.deepseekBaseUrl.rstrip("/") or "https://api.deepseek.com",
+        deepseekModel=payload.deepseekModel.strip() or "deepseek-v4-flash",
+        deepseekApiKey=next_key,
+        jimengMode=jimeng_mode,
+        jimengApiUrl=payload.jimengApiUrl,
+        jimengModel=payload.jimengModel.strip() or "jimeng-video-seedance-2.0",
+        jimengRegion=jimeng_region,
+        updatedAt=time.time(),
+    )
+    save_agent_settings(settings)
+    return agent_settings_to_public(settings)
+
+@app.get("/admin/agent/status")
+def get_agent_status(_: UserRecord = Depends(require_admin)):
+    settings = load_agent_settings()
+    active_runs = [sync_run_from_shots(run) for run in agent_runs.values()]
+    active_runs = sorted(active_runs, key=lambda item: item.updatedAt, reverse=True)
+    return {
+        "config": agent_settings_to_public(settings),
+        "queueSize": task_queue.qsize(),
+        "activeCookies": len([cookie for cookie in cookie_pool.values() if cookie.status == "active"]),
+        "busyCookies": len([cookie for cookie in cookie_pool.values() if cookie.activeTasks > 0]),
+        "runningRuns": len([
+            run for run in active_runs
+            if run.status in {"queued", "planning", "awaiting_confirmation", "generating"}
+        ]),
+        "failedRuns": len([run for run in active_runs if run.status == "failed"]),
+        "recentRuns": active_runs[:8],
+    }
+
+@app.post("/agent/uploads", response_model=AgentUploadResponse)
+async def upload_agent_reference(
+    image: UploadFile = File(...),
+    current_user: UserRecord = Depends(get_current_user),
+):
+    allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    extension = allowed_types.get(image.content_type or "")
+    if not extension:
+        raise HTTPException(status_code=400, detail="仅支持 JPG、PNG 或 WebP 参考图片")
+
+    content = await image.read(10 * 1024 * 1024 + 1)
+    await image.close()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="单张参考图片不能超过 10MB")
+    if not content:
+        raise HTTPException(status_code=400, detail="参考图片为空")
+
+    image_id = f"ref-{secrets.token_hex(12)}"
+    user_dir = UPLOADS_DIR / current_user.id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    file_path = user_dir / f"{image_id}{extension}"
+    file_path.write_bytes(content)
+    reference = UploadedReference(
+        id=image_id,
+        userId=current_user.id,
+        name=image.filename or f"reference{extension}",
+        path=str(file_path),
+    )
+    uploaded_references[image_id] = reference
+    return AgentUploadResponse(id=image_id, name=reference.name)
+
+@app.post("/agent/runs", response_model=AgentRun)
+async def create_agent_run(
+    payload: AgentCreatePayload,
+    background_tasks: BackgroundTasks,
+    current_user: UserRecord = Depends(get_current_user),
+):
+    if not payload.idea.strip():
+        raise HTTPException(status_code=400, detail="请先填写视频创意")
+    invalid_references = [
+        image_id for image_id in payload.imageIds
+        if image_id not in uploaded_references
+        or uploaded_references[image_id].userId != current_user.id
+    ]
+    if invalid_references:
+        raise HTTPException(status_code=400, detail="存在无效或无权访问的参考图片")
+
+    run_id = f"agent-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+    run = AgentRun(
+        id=run_id,
+        userId=current_user.id,
+        userEmail=current_user.email,
+        status="queued",
+        stage="queued",
+        progress=2,
+        idea=payload.idea.strip(),
+        duration=payload.duration,
+        segmentDuration=payload.segmentDuration,
+        style=payload.style,
+        ratio=payload.ratio,
+        imageNames=payload.imageNames,
+        imageIds=payload.imageIds,
+        createdAt=time.time(),
+        updatedAt=time.time(),
+    )
+    agent_runs[run_id] = run
+    background_tasks.add_task(process_agent_run, run_id)
+    return run
+
+@app.post("/agent/runs/{run_id}/confirm", response_model=AgentRun)
+async def confirm_agent_run(
+    run_id: str,
+    payload: AgentConfirmPayload,
+    background_tasks: BackgroundTasks,
+    current_user: UserRecord = Depends(get_current_user),
+):
+    run = agent_runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if current_user.role != "admin" and run.userId != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot edit this Agent run")
+    if run.status != "awaiting_confirmation":
+        raise HTTPException(status_code=409, detail="当前任务不在分镜确认阶段")
+    if payload.candidateId not in {candidate.id for candidate in run.candidates}:
+        raise HTTPException(status_code=400, detail="候选剧本不存在")
+    if sum(scene.duration for scene in payload.scenes) != run.duration:
+        raise HTTPException(status_code=400, detail="分镜总时长必须与目标视频时长一致")
+
+    start = 0
+    confirmed_scenes = []
+    for index, scene in enumerate(payload.scenes):
+        end = start + scene.duration
+        confirmed_scenes.append(
+            AgentRunScene(
+                id=f"{run.id}-scene-{index + 1}",
+                number=str(index + 1).zfill(2),
+                time=f"{format_time(start)} - {format_time(end)}",
+                title=scene.title.strip(),
+                prompt=scene.prompt.strip(),
+                duration=scene.duration,
+            )
+        )
+        start = end
+
+    run.selectedCandidateId = payload.candidateId
+    run.scenes = confirmed_scenes
+    run.status = "queued"
+    run.stage = "jimeng_dispatch"
+    run.progress = 20
+    run.updatedAt = time.time()
+    agent_runs[run.id] = run
+    background_tasks.add_task(process_confirmed_run, run.id)
+    return run
+
+@app.get("/agent/runs/{run_id}", response_model=AgentRun)
+def get_agent_run(run_id: str, current_user: UserRecord = Depends(get_current_user)):
+    run = agent_runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if current_user.role != "admin" and run.userId != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot view this Agent run")
+    return sync_run_from_shots(run)
+
 @app.get("/health")
 def health_check():
     """Return hardware status and backend health information."""
@@ -253,7 +1180,8 @@ def health_check():
         "vram_allocated_gb": 0.0,
         "concurrency_limit": 2,
         "queue_size": task_queue.qsize(),
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "jimeng_cli": cli_public_status(),
     }
 
 # --- Cookie Pool CRUD ---

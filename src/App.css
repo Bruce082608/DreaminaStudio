@@ -164,6 +164,15 @@
   color: #38bdf8;
 }
 
+.brand-logo-image {
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.48rem;
+  object-fit: cover;
+}
+
 .ghost-button,
 .icon-text-button,
 .icon-button,
@@ -1472,7 +1481,15 @@
   box-shadow: none;
 }
 
-.api-error {
+.idea-composer textarea:disabled,
+.segmented-control button:disabled,
+.upload-drop:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.api-error,
+.api-success {
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -1484,6 +1501,12 @@
   color: #fecaca;
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+.api-success {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.09);
+  color: #bbf7d0;
 }
 
 .director-panel {
@@ -1780,6 +1803,21 @@
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.scene-result-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.7rem;
+  color: #7dd3fc;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.scene-result-link:hover {
+  color: #e0f2fe;
 }
 
 .scene-card:hover .scene-main p {
