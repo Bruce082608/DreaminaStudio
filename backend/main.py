@@ -13,13 +13,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
+from fastapi.staticfiles import StaticFiles
 import httpx
 from pydantic import BaseModel, Field
 
 try:
-    from .jimeng_cli import JimengCliError, cli_public_status, generate_video
+    from .jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
 except ImportError:
-    from jimeng_cli import JimengCliError, cli_public_status, generate_video
+    from jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -119,7 +120,7 @@ class AgentSettings(BaseModel):
     deepseekApiKey: Optional[str] = None
     jimengMode: str = "cli"
     jimengApiUrl: Optional[str] = None
-    jimengModel: str = "jimeng-video-seedance-2.0"
+    jimengModel: str = "seedance2.0fast"
     jimengRegion: str = "cn"
     updatedAt: Optional[float] = None
 
@@ -129,7 +130,7 @@ class AgentSettingsUpdate(BaseModel):
     deepseekApiKey: Optional[str] = None
     jimengMode: str = "cli"
     jimengApiUrl: Optional[str] = None
-    jimengModel: str = "jimeng-video-seedance-2.0"
+    jimengModel: str = "seedance2.0fast"
     jimengRegion: str = "cn"
 
 class AgentSettingsPublic(BaseModel):
@@ -150,6 +151,7 @@ class AgentCreatePayload(BaseModel):
     segmentDuration: int = Field(default=10, ge=4, le=15)
     style: str = "电影感"
     ratio: str = "16:9"
+    jimengModel: str = "seedance2.0fast"
     imageNames: List[str] = Field(default_factory=list)
     imageIds: List[str] = Field(default_factory=list, max_length=9)
 
@@ -196,6 +198,7 @@ class AgentRun(BaseModel):
     segmentDuration: int = 10
     style: str
     ratio: str
+    jimengModel: str = "seedance2.0fast"
     imageNames: List[str] = Field(default_factory=list)
     imageIds: List[str] = Field(default_factory=list)
     candidates: List[AgentStoryboardCandidate] = Field(default_factory=list)
@@ -249,6 +252,24 @@ OUTPUTS_DIR = DATA_DIR / "outputs"
 DEFAULT_ADMIN_EMAIL = os.getenv("DREAMINA_ADMIN_EMAIL", "admin@dreamina.local").lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("DREAMINA_ADMIN_PASSWORD", "Dreamina@2026")
 AUTH_SECRET = os.getenv("DREAMINA_AUTH_SECRET", "dreamina-studio-local-dev-secret")
+
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
+
+SUPPORTED_JIMENG_MODELS = {
+    "seedance2.0",
+    "seedance2.0fast",
+    "seedance2.0_vip",
+    "seedance2.0fast_vip",
+    "seedance2.0mini",
+}
+
+JIMENG_MODEL_ALIASES = {
+    "jimeng-video-seedance-2.0": "seedance2.0",
+    "jimeng-video-seedance-2.0-fast": "seedance2.0fast",
+    "jimeng-video-seedance-2.0-vip": "seedance2.0_vip",
+    "jimeng-video-seedance-2.0-fast-vip": "seedance2.0fast_vip",
+}
 
 # Mock Video URLs
 MOCK_VIDEOS = [
@@ -391,15 +412,25 @@ def save_agent_settings(settings: AgentSettings) -> None:
     with SETTINGS_FILE.open("w", encoding="utf-8") as file:
         json.dump(jsonable_encoder(settings), file, ensure_ascii=False, indent=2)
 
+def normalize_jimeng_model(model: str) -> str:
+    normalized = (model or "").strip()
+    normalized = JIMENG_MODEL_ALIASES.get(normalized, normalized)
+    if normalized not in SUPPORTED_JIMENG_MODELS:
+        raise HTTPException(status_code=400, detail="不支持的即梦模型")
+    return normalized
+
 def agent_settings_to_public(settings: AgentSettings) -> AgentSettingsPublic:
     cli_status = cli_public_status()
+    jimeng_model = JIMENG_MODEL_ALIASES.get(settings.jimengModel, settings.jimengModel)
+    if jimeng_model not in SUPPORTED_JIMENG_MODELS:
+        jimeng_model = "seedance2.0fast"
     return AgentSettingsPublic(
         deepseekBaseUrl=settings.deepseekBaseUrl,
         deepseekModel=settings.deepseekModel,
         deepseekApiKeySet=bool(settings.deepseekApiKey),
         jimengMode=settings.jimengMode,
         jimengApiUrl=settings.jimengApiUrl,
-        jimengModel=settings.jimengModel,
+        jimengModel=jimeng_model,
         jimengRegion=settings.jimengRegion,
         jimengCliAvailable=cli_status["available"],
         jimengTokenPoolConfigured=cli_status["tokenPoolConfigured"],
@@ -433,46 +464,39 @@ def fallback_candidates(payload: AgentCreatePayload, run_id: str) -> List[AgentS
         "视觉高潮",
         "尾声与回响",
     ]
-    variants = [
-        ("叙事推进版", "强调事件因果、人物行动和清晰转折"),
-        ("情绪电影版", "强调环境氛围、表演细节和情绪递进"),
-        ("视觉节奏版", "强调镜头变化、动作节奏和视觉记忆点"),
-    ]
-    candidates = []
-    for candidate_index, (candidate_title, direction) in enumerate(variants, start=1):
-        scenes = []
-        start = 0
-        for scene_index, scene_duration in enumerate(get_scene_durations(payload)):
-            end = start + scene_duration
-            reference_note = (
-                "使用上传参考图保持人物一致，不描述人物衣物服装。"
-                if payload.imageIds
-                else "完整描述人物外观、环境和关键视觉特征。"
-            )
-            scenes.append(
-                AgentRunScene(
-                    id=f"{run_id}-c{candidate_index}-scene-{scene_index + 1}",
-                    number=str(scene_index + 1).zfill(2),
-                    time=f"{format_time(start)} - {format_time(end)}",
-                    title=titles[scene_index % len(titles)],
-                    duration=scene_duration,
-                    prompt=(
-                        f"{payload.style}式分镜，{payload.ratio}，{direction}。{reference_note}"
-                        f"本段必须独立描述画面主体、动作或对话、环境、光线、情绪和运镜。"
-                        f"剧本内容：{payload.idea}"
-                    ),
-                )
-            )
-            start = end
-        candidates.append(
-            AgentStoryboardCandidate(
-                id=f"{run_id}-candidate-{candidate_index}",
-                title=candidate_title,
-                summary=direction,
-                scenes=scenes,
+    direction = "强调叙事清晰、镜头连续、动作可执行和情绪递进"
+    scenes = []
+    start = 0
+    for scene_index, scene_duration in enumerate(get_scene_durations(payload)):
+        end = start + scene_duration
+        reference_note = (
+            "使用上传参考图保持人物一致，不描述人物衣物服装。"
+            if payload.imageIds
+            else "完整描述人物外观、环境和关键视觉特征。"
+        )
+        scenes.append(
+            AgentRunScene(
+                id=f"{run_id}-c1-scene-{scene_index + 1}",
+                number=str(scene_index + 1).zfill(2),
+                time=f"{format_time(start)} - {format_time(end)}",
+                title=titles[scene_index % len(titles)],
+                duration=scene_duration,
+                prompt=(
+                    f"{payload.style}式分镜，{payload.ratio}，{direction}。{reference_note}"
+                    f"本段必须独立描述画面主体、动作或对话、环境、光线、情绪和运镜。"
+                    f"剧本内容：{payload.idea}"
+                ),
             )
         )
-    return candidates
+        start = end
+    return [
+        AgentStoryboardCandidate(
+            id=f"{run_id}-candidate-1",
+            title="分镜剧本",
+            summary=direction,
+            scenes=scenes,
+        )
+    ]
 
 def extract_json_object(text: str) -> Dict[str, Any]:
     cleaned = text.strip()
@@ -486,9 +510,15 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     if start == -1 or end == -1 or end <= start:
         raise ValueError("Agent response did not contain JSON")
 
-    return json.loads(cleaned[start : end + 1])
+    json_text = cleaned[start : end + 1]
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"分镜生成服务返回了非严格 JSON：{exc.msg}，位置 line {exc.lineno} column {exc.colno}"
+        ) from exc
 
-def build_deepseek_prompt(payload: AgentCreatePayload, candidate_index: int) -> str:
+def build_storyboard_prompt(payload: AgentCreatePayload) -> str:
     scene_durations = get_scene_durations(payload)
     reference_rule = (
         "有参考图片。不要对人物进行任何衣物、服装、配饰上的描述；"
@@ -496,11 +526,6 @@ def build_deepseek_prompt(payload: AgentCreatePayload, candidate_index: int) -> 
         if payload.imageIds
         else "没有参考图片，需要完整描述人物的稳定视觉特征。"
     )
-    candidate_directions = [
-        "方案一：叙事清晰，强调事件因果、角色动机和戏剧转折。",
-        "方案二：情绪浓郁，强调表演细节、环境氛围和电影感。",
-        "方案三：视觉大胆，强调动作节奏、运镜变化和记忆点。",
-    ]
     return f"""【基础设定】
 我将使用即梦seedance2.0模型制作一个总长{payload.duration}秒的分段长视频，请你按照要求生成详细的提示词剧本，并可适当补充细节（人物对话、人物动作等，但必须包含我说的内容）。
 
@@ -512,25 +537,73 @@ def build_deepseek_prompt(payload: AgentCreatePayload, candidate_index: int) -> 
 【剧本描述】
 {payload.idea}
 
-【本候选方向】
-{candidate_directions[candidate_index - 1]}
+【方案方向】
+生成一套叙事清晰、镜头连续、动作可执行、适合用户继续修改的分镜剧本。
 
 只输出 JSON，不要输出 Markdown 或解释。JSON 格式：
-{{"title":"候选剧本标题","summary":"一句话说明本方案特点","scenes":[{{"title":"分镜标题","prompt":"可直接提交给即梦 Seedance 2.0 的完整独立提示词"}}]}}
-scenes 必须严格输出 {len(scene_durations)} 段。"""
+{{"title":"分镜剧本标题","summary":"一句话说明本方案特点","scenes":[{{"title":"分镜标题","prompt":"可直接提交给即梦 Seedance 2.0 的完整独立提示词"}}]}}
+scenes 必须严格输出 {len(scene_durations)} 段。
+JSON 字符串内部禁止使用未转义的英文双引号；人物对话请使用中文引号「」或中文冒号，避免破坏 JSON。"""
 
-async def plan_candidate_with_deepseek(
+async def repair_storyboard_json(
+    client: httpx.AsyncClient,
+    settings: AgentSettings,
+    invalid_content: str,
+    parse_error: Exception,
+    expected_scene_count: int,
+) -> Dict[str, Any]:
+    repair_prompt = f"""下面是一段分镜生成服务返回的 JSON，但它不是严格合法 JSON。
+请只修复 JSON 语法，不要改写分镜内容，不要新增或删除字段，不要输出 Markdown。
+
+要求：
+1. 输出必须是一个合法 JSON object。
+2. 顶层必须包含 title、summary、scenes。
+3. scenes 必须严格保留 {expected_scene_count} 段。
+4. JSON 字符串内部如果有对话，使用中文引号「」或正确转义英文双引号。
+
+解析错误：
+{parse_error}
+
+待修复内容：
+{invalid_content}
+"""
+    response = await client.post(
+        f"{settings.deepseekBaseUrl.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {settings.deepseekApiKey}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": settings.deepseekModel,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是严格的 JSON 修复器。只输出可被 json.loads 解析的合法 JSON object。",
+                },
+                {"role": "user", "content": repair_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "stream": False,
+        },
+    )
+    response.raise_for_status()
+    repaired_content = response.json()["choices"][0]["message"]["content"]
+    return extract_json_object(repaired_content)
+
+async def plan_storyboard_candidate(
     payload: AgentCreatePayload,
     run_id: str,
     settings: AgentSettings,
-    candidate_index: int,
 ) -> AgentStoryboardCandidate:
     if not settings.deepseekApiKey:
-        raise RuntimeError("管理员尚未配置 DeepSeek API Key")
+        raise RuntimeError("管理员尚未配置分镜生成服务")
     system_prompt = (
         "你是专业的视频分镜编剧。你只负责写详细、可编辑、可直接交给即梦 Seedance 2.0 的分镜剧本，"
         "不负责生成视频，也不执行任何外部工具。必须输出合法 JSON。"
     )
+
+    scene_durations = get_scene_durations(payload)
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
@@ -543,7 +616,7 @@ async def plan_candidate_with_deepseek(
                 "model": settings.deepseekModel,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": build_deepseek_prompt(payload, candidate_index)},
+                    {"role": "user", "content": build_storyboard_prompt(payload)},
                 ],
                 "response_format": {"type": "json_object"},
                 "temperature": 0.85,
@@ -553,13 +626,26 @@ async def plan_candidate_with_deepseek(
         response.raise_for_status()
         data = response.json()
 
-    content = data["choices"][0]["message"]["content"]
-    planned = extract_json_object(content)
+        content = data["choices"][0]["message"]["content"]
+        try:
+            planned = extract_json_object(content)
+        except ValueError as exc:
+            logger.warning(
+                "Storyboard generator returned malformed JSON. Attempting repair: %s",
+                exc,
+            )
+            planned = await repair_storyboard_json(
+                client,
+                settings,
+                content,
+                exc,
+                len(scene_durations),
+            )
+
     raw_scenes = planned.get("scenes") or []
-    scene_durations = get_scene_durations(payload)
     if len(raw_scenes) != len(scene_durations):
         raise RuntimeError(
-            f"DeepSeek 候选 {candidate_index} 返回了 {len(raw_scenes)} 段，预期 {len(scene_durations)} 段"
+            f"分镜生成服务返回了 {len(raw_scenes)} 段，预期 {len(scene_durations)} 段"
         )
 
     scenes = []
@@ -568,7 +654,7 @@ async def plan_candidate_with_deepseek(
         end = start + scene_duration
         scenes.append(
             AgentRunScene(
-                id=f"{run_id}-c{candidate_index}-scene-{index + 1}",
+                id=f"{run_id}-c1-scene-{index + 1}",
                 number=str(index + 1).zfill(2),
                 time=f"{format_time(start)} - {format_time(end)}",
                 title=str(scene.get("title") or f"分镜 {index + 1}"),
@@ -579,10 +665,10 @@ async def plan_candidate_with_deepseek(
         start = end
 
     if any(len(scene.prompt) < 10 for scene in scenes):
-        raise RuntimeError(f"DeepSeek 候选 {candidate_index} 包含空白或过短的分镜提示词")
+        raise RuntimeError("分镜生成服务返回了空白或过短的分镜提示词")
     return AgentStoryboardCandidate(
-        id=f"{run_id}-candidate-{candidate_index}",
-        title=str(planned.get("title") or f"候选剧本 {candidate_index}"),
+        id=f"{run_id}-candidate-1",
+        title=str(planned.get("title") or "分镜剧本"),
         summary=str(planned.get("summary") or "可编辑的 Seedance 2.0 分镜方案"),
         scenes=scenes,
     )
@@ -595,17 +681,13 @@ async def build_scene_plan(
     if not settings.deepseekApiKey:
         if settings.jimengMode == "mock":
             return fallback_candidates(payload, run_id), "local-storyboard"
-        raise RuntimeError("管理员尚未配置 DeepSeek API Key")
+        raise RuntimeError("管理员尚未配置分镜生成服务")
 
     try:
-        candidates = []
-        for candidate_index in range(1, 4):
-            candidates.append(
-                await plan_candidate_with_deepseek(payload, run_id, settings, candidate_index)
-            )
-        return candidates, settings.deepseekModel
+        candidate = await plan_storyboard_candidate(payload, run_id, settings)
+        return [candidate], settings.deepseekModel
     except Exception as exc:
-        raise RuntimeError(f"DeepSeek Agent 请求失败：{exc}") from exc
+        raise RuntimeError(f"分镜剧本生成失败：{exc}") from exc
 
 def sync_run_from_shots(run: AgentRun) -> AgentRun:
     if not run.scenes:
@@ -660,6 +742,7 @@ async def process_agent_run(run_id: str) -> None:
         segmentDuration=run.segmentDuration,
         style=run.style,
         ratio=run.ratio,
+        jimengModel=run.jimengModel,
         imageNames=run.imageNames,
         imageIds=run.imageIds,
     )
@@ -667,7 +750,7 @@ async def process_agent_run(run_id: str) -> None:
     try:
         settings = load_agent_settings()
         run.status = "planning"
-        run.stage = "deepseek_planning" if settings.deepseekApiKey else "local_planning"
+        run.stage = "storyboard_planning" if settings.deepseekApiKey else "local_planning"
         run.progress = 8
         run.updatedAt = time.time()
         agent_runs[run_id] = run
@@ -744,10 +827,12 @@ async def process_confirmed_run(run_id: str) -> None:
                         prompt=f"{reference_instruction}{scene.prompt}",
                         duration=scene.duration,
                         ratio=run.ratio,
-                        model=settings.jimengModel,
+                        model=run.jimengModel or settings.jimengModel,
                         region=settings.jimengRegion,
                         output_dir=OUTPUTS_DIR / run.id / scene.id,
                         reference_paths=reference_paths,
+                        public_root=OUTPUTS_DIR,
+                        public_url_prefix="/api/outputs",
                     )
                     shot.videoUrl = result.video_url
                     shot.progress = 100
@@ -1023,7 +1108,7 @@ def update_agent_config(payload: AgentSettingsUpdate, _: UserRecord = Depends(re
         deepseekApiKey=next_key,
         jimengMode=jimeng_mode,
         jimengApiUrl=payload.jimengApiUrl,
-        jimengModel=payload.jimengModel.strip() or "jimeng-video-seedance-2.0",
+        jimengModel=normalize_jimeng_model(payload.jimengModel),
         jimengRegion=jimeng_region,
         updatedAt=time.time(),
     )
@@ -1047,6 +1132,11 @@ def get_agent_status(_: UserRecord = Depends(require_admin)):
         "failedRuns": len([run for run in active_runs if run.status == "failed"]),
         "recentRuns": active_runs[:8],
     }
+
+@app.get("/admin/jimeng/account")
+async def get_jimeng_account(_: UserRecord = Depends(require_admin), limit: int = 10):
+    task_limit = max(1, min(limit, 30))
+    return await get_account_snapshot(task_limit=task_limit)
 
 @app.post("/agent/uploads", response_model=AgentUploadResponse)
 async def upload_agent_reference(
@@ -1094,6 +1184,7 @@ async def create_agent_run(
     ]
     if invalid_references:
         raise HTTPException(status_code=400, detail="存在无效或无权访问的参考图片")
+    jimeng_model = normalize_jimeng_model(payload.jimengModel)
 
     run_id = f"agent-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
     run = AgentRun(
@@ -1108,6 +1199,7 @@ async def create_agent_run(
         segmentDuration=payload.segmentDuration,
         style=payload.style,
         ratio=payload.ratio,
+        jimengModel=jimeng_model,
         imageNames=payload.imageNames,
         imageIds=payload.imageIds,
         createdAt=time.time(),

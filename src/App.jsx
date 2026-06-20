@@ -12,6 +12,7 @@ import {
   Clock3,
   Download,
   Film,
+  FileText,
   GalleryVerticalEnd,
   ImagePlus,
   Layers3,
@@ -82,10 +83,14 @@ function BrandLogo() {
 }
 
 const durationOptions = [
+  { label: '15秒', value: 15 },
   { label: '30秒', value: 30 },
+  { label: '45秒', value: 45 },
   { label: '1分钟', value: 60 },
+  { label: '2分钟', value: 120 },
   { label: '3分钟', value: 180 },
   { label: '5分钟', value: 300 },
+  { label: '7分钟', value: 420 },
   { label: '10分钟', value: 600 },
 ];
 
@@ -93,6 +98,97 @@ const segmentDurationOptions = [5, 10, 15];
 
 const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
 const ratioOptions = ['16:9', '9:16', '1:1'];
+
+const jimengModelOptions = [
+  {
+    value: 'seedance2.0fast',
+    label: 'Seedance 2.0 Fast',
+    shortLabel: 'Fast',
+    speed: '更快',
+    quality: '标准',
+    cost: '较低',
+    description: '适合草稿、快速验证和批量生成。',
+  },
+  {
+    value: 'seedance2.0',
+    label: 'Seedance 2.0',
+    shortLabel: '标准',
+    speed: '均衡',
+    quality: '高',
+    cost: '中',
+    description: '适合大多数正式创作任务。',
+  },
+  {
+    value: 'seedance2.0mini',
+    label: 'Seedance 2.0 Mini',
+    shortLabel: 'Mini',
+    speed: '最快',
+    quality: '轻量',
+    cost: '低',
+    description: '适合低成本预览和结构测试。',
+  },
+  {
+    value: 'seedance2.0_vip',
+    label: 'Seedance 2.0 VIP',
+    shortLabel: 'VIP',
+    speed: '较慢',
+    quality: '最高',
+    cost: '高',
+    description: '适合质量优先的关键片段，可支持 1080p。',
+  },
+  {
+    value: 'seedance2.0fast_vip',
+    label: 'Seedance 2.0 Fast VIP',
+    shortLabel: 'Fast VIP',
+    speed: '快',
+    quality: '高',
+    cost: '较高',
+    description: '适合想兼顾速度和质量的正式片段。',
+  },
+];
+
+const jimengCliDocs = [
+  {
+    title: '登录与账号',
+    points: [
+      '首次使用先运行 dreamina login；本地会保存 OAuth 登录态。',
+      'headless 登录会输出 verification_uri、user_code、device_code，需要再用 checklogin 完成登录。',
+      'dreamina user_credit 可读取账号剩余积分，dreamina list_task 可查看最近任务。',
+    ],
+  },
+  {
+    title: '视频生成命令',
+    points: [
+      'prompt-only 视频使用 dreamina text2video。',
+      '带参考图、视频或音频时使用 dreamina multimodal2video；本地文件会自动上传。',
+      '异步任务可用 --poll 短暂等待；后续用 dreamina query_result --submit_id 查询。',
+    ],
+  },
+  {
+    title: '模型与限制',
+    points: [
+      '官方 CLI 支持 seedance2.0、seedance2.0fast、seedance2.0_vip、seedance2.0fast_vip、seedance2.0mini。',
+      '单段视频 duration 支持 4-15 秒，本网站会按目标总长拆分为多段顺序生成。',
+      'ratio 支持 1:1、3:4、16:9、4:3、9:16、21:9；当前创作台开放常用画幅。',
+    ],
+  },
+  {
+    title: '素材与分辨率',
+    points: [
+      'multimodal2video 至少需要一个 image 或 video 输入。',
+      '参考素材限制：image<=9、video<=3、audio<=3；audio 需为 2-15 秒。',
+      'seedance2.0_vip 支持 720p 或 1080p，其余模型官方帮助标注为 720p。',
+    ],
+  },
+  {
+    title: '计费与风险',
+    points: [
+      '所有真实生成都会消耗积分，测试前应先确认账号余额。',
+      'CLI 帮助不直接给出固定积分单价，实际消耗以 list_task 返回的 credit_count 为准。',
+      '部分高内容安全风险模型首次使用前可能需要在 Web 端授权；遇到 AigcComplianceConfirmationRequired 后先完成网页确认再重试。',
+    ],
+  },
+];
 
 const visualAssets = {
   heroConsole: new URL('./assets/gallery/hero-console.jpg', import.meta.url).href,
@@ -134,17 +230,18 @@ const sceneVisuals = Array.from({ length: 12 }, (_, index) =>
 
 const agentStages = [
   '提交创意与参考图',
-  'DeepSeek 生成三套分镜',
-  '选择并编辑候选剧本',
+  '生成分镜剧本',
+  '查看并编辑分镜',
   '即梦 CLI 串行生成',
   '返回视频片段结果',
 ];
 
 const agentStageLabels = {
   queued: '任务已进入队列',
-  deepseek_planning: 'DeepSeek 正在规划分镜',
-  local_planning: '本地 Agent 正在规划分镜',
-  awaiting_confirmation: '三套候选分镜等待确认',
+  deepseek_planning: '正在规划分镜',
+  storyboard_planning: '正在规划分镜',
+  local_planning: '正在规划分镜',
+  awaiting_confirmation: '分镜剧本等待确认',
   jimeng_dispatch: '正在提交视频生成任务',
   jimeng_generating: '即梦 CLI 正在逐段生成',
   completed: '视频片段已全部返回',
@@ -154,6 +251,7 @@ const agentStageLabels = {
 const agentStageIndexes = {
   queued: 0,
   deepseek_planning: 1,
+  storyboard_planning: 1,
   local_planning: 1,
   awaiting_confirmation: 2,
   jimeng_dispatch: 3,
@@ -616,6 +714,68 @@ function formatDate(timestamp) {
   }).format(new Date(timestamp * 1000));
 }
 
+function formatNumber(value, emptyLabel = '暂无数据') {
+  if (value === null || value === undefined || value === '') return emptyLabel;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return new Intl.NumberFormat('zh-CN').format(number);
+}
+
+function formatJimengVip(level) {
+  const vipMap = {
+    maestro: '高级会员 Maestro',
+    premium: '高级会员',
+    pro: 'Pro 会员',
+    standard: '标准账号',
+  };
+  return vipMap[level] || level || '未登录';
+}
+
+function getJimengTaskStatusMeta(status) {
+  const statusMap = {
+    success: { label: '成功', tone: 'done' },
+    fail: { label: '失败', tone: 'failed' },
+    failed: { label: '失败', tone: 'failed' },
+    running: { label: '生成中', tone: 'active' },
+    processing: { label: '生成中', tone: 'active' },
+    pending: { label: '等待中', tone: 'queued' },
+  };
+  return statusMap[status] || { label: status || '未知', tone: 'queued' };
+}
+
+function compactSubmitId(submitId) {
+  if (!submitId) return '无任务 ID';
+  const value = String(submitId);
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 8)}...${value.slice(-6)}`;
+}
+
+function getJimengTaskCredit(task) {
+  return task?.commerce_info?.credit_count ?? 0;
+}
+
+function getJimengTaskBenefit(task) {
+  const triplets = task?.commerce_info?.triplets;
+  if (Array.isArray(triplets) && triplets.length > 0) {
+    return triplets.map((item) => item?.benefit_type).filter(Boolean).join(' / ') || '未标记权益';
+  }
+  return task?.commerce_info?.triplet?.benefit_type || '未标记权益';
+}
+
+function getJimengTaskVideoMeta(task) {
+  const video = task?.result_json?.videos?.[0];
+  if (!video) return task?.fail_reason || '暂无视频结果';
+
+  const size = video.width && video.height ? `${video.width}x${video.height}` : '未知尺寸';
+  const duration = Number.isFinite(Number(video.duration)) ? `${Number(video.duration).toFixed(1)}秒` : '未知时长';
+  const fps = video.fps ? `${video.fps}fps` : '未知帧率';
+  return `${size} · ${duration} · ${fps} · ${video.format || 'mp4'}`;
+}
+
+function getJimengModelOption(value) {
+  return jimengModelOptions.find((option) => option.value === value) || jimengModelOptions[0];
+}
+
 function AuthPage({ mode, onAuthSuccess, onSwitchMode, onShowHome }) {
   const isRegister = mode === 'register';
   const [name, setName] = useState('');
@@ -761,13 +921,14 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
   const [error, setError] = useState('');
   const [agentConfig, setAgentConfig] = useState(null);
   const [agentStatus, setAgentStatus] = useState(null);
+  const [jimengAccount, setJimengAccount] = useState(null);
   const [agentForm, setAgentForm] = useState({
     deepseekBaseUrl: 'https://api.deepseek.com',
     deepseekModel: 'deepseek-v4-flash',
     deepseekApiKey: '',
     jimengMode: 'cli',
     jimengApiUrl: '',
-    jimengModel: 'jimeng-video-seedance-2.0',
+    jimengModel: 'seedance2.0fast',
     jimengRegion: 'cn',
   });
   const [agentMessage, setAgentMessage] = useState('');
@@ -777,11 +938,12 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
 
     async function loadAdminData() {
       try {
-        const [nextStats, nextUsers, nextConfig, nextAgentStatus] = await Promise.all([
+        const [nextStats, nextUsers, nextConfig, nextAgentStatus, nextJimengAccount] = await Promise.all([
           apiRequest('/admin/stats', { authToken: auth?.token }),
           apiRequest('/admin/users', { authToken: auth?.token }),
           apiRequest('/admin/agent/config', { authToken: auth?.token }),
           apiRequest('/admin/agent/status', { authToken: auth?.token }),
+          apiRequest('/admin/jimeng/account?limit=10', { authToken: auth?.token }),
         ]);
 
         if (isMounted) {
@@ -789,6 +951,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
           setUsers(nextUsers);
           setAgentConfig(nextConfig);
           setAgentStatus(nextAgentStatus);
+          setJimengAccount(nextJimengAccount);
           setAgentForm({
             deepseekBaseUrl: nextConfig.deepseekBaseUrl,
             deepseekModel: nextConfig.deepseekModel,
@@ -815,7 +978,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
 
   async function handleAgentConfigSubmit(event) {
     event.preventDefault();
-    setAgentMessage('正在保存 Agent 配置...');
+    setAgentMessage('正在保存服务配置...');
     setError('');
 
     try {
@@ -824,11 +987,15 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
         authToken: auth?.token,
         body: JSON.stringify(agentForm),
       });
-      const nextAgentStatus = await apiRequest('/admin/agent/status', { authToken: auth?.token });
+      const [nextAgentStatus, nextJimengAccount] = await Promise.all([
+        apiRequest('/admin/agent/status', { authToken: auth?.token }),
+        apiRequest('/admin/jimeng/account?limit=10', { authToken: auth?.token }),
+      ]);
       setAgentConfig(savedConfig);
       setAgentStatus(nextAgentStatus);
+      setJimengAccount(nextJimengAccount);
       setAgentForm((current) => ({ ...current, deepseekApiKey: '' }));
-      setAgentMessage('Agent 配置已保存');
+      setAgentMessage('服务配置已保存');
     } catch (requestError) {
       setAgentMessage('');
       setError(requestError.message);
@@ -849,17 +1016,19 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     setError('');
 
     try {
-      const [nextStats, nextUsers, nextConfig, nextAgentStatus] = await Promise.all([
+      const [nextStats, nextUsers, nextConfig, nextAgentStatus, nextJimengAccount] = await Promise.all([
         apiRequest('/admin/stats', { authToken: auth?.token }),
         apiRequest('/admin/users', { authToken: auth?.token }),
         apiRequest('/admin/agent/config', { authToken: auth?.token }),
         apiRequest('/admin/agent/status', { authToken: auth?.token }),
+        apiRequest('/admin/jimeng/account?limit=10', { authToken: auth?.token }),
       ]);
 
       setStats(nextStats);
       setUsers(nextUsers);
       setAgentConfig(nextConfig);
       setAgentStatus(nextAgentStatus);
+      setJimengAccount(nextJimengAccount);
       setAgentForm((current) => ({
         ...current,
         deepseekBaseUrl: nextConfig.deepseekBaseUrl,
@@ -892,12 +1061,16 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     );
   }
 
+  const jimengAccountInfo = jimengAccount?.account || {};
+  const jimengSummary = jimengAccount?.summary || {};
+  const recentJimengTasks = Array.isArray(jimengAccount?.tasks) ? jimengAccount.tasks : [];
+
   const statCards = [
     { label: '注册用户', value: stats?.totalUsers ?? '-', icon: Users },
     { label: '活跃账号', value: stats?.activeUsers ?? '-', icon: BadgeCheck },
     { label: '7 日登录', value: stats?.recentLogins ?? '-', icon: CalendarClock },
     { label: '分镜任务', value: stats?.generatedShots ?? '-', icon: Clapperboard },
-    { label: 'Agent 任务', value: stats?.agentRuns ?? '-', icon: Bot },
+    { label: '创作任务', value: stats?.agentRuns ?? '-', icon: Bot },
     { label: '运行中', value: stats?.activeAgentRuns ?? '-', icon: Loader2 },
     { label: '失败任务', value: stats?.failedAgentRuns ?? '-', icon: AlertTriangle },
     { label: '队列长度', value: stats?.queueSize ?? '-', icon: Workflow },
@@ -905,9 +1078,9 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
 
   const adminInsights = [
     {
-      label: 'Agent 接入状态',
+      label: '分镜服务状态',
       value: agentConfig?.deepseekApiKeySet ? '已接入' : '待配置',
-      text: agentConfig?.deepseekApiKeySet ? 'DeepSeek 密钥已保存，可直接处理创作任务。' : '配置 API Key 后可开启真实 Agent 流程。',
+      text: agentConfig?.deepseekApiKeySet ? '分镜服务密钥已保存，可直接处理创作任务。' : '配置 API Key 后可开启真实创作流程。',
       icon: ShieldCheck,
     },
     {
@@ -915,6 +1088,12 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
       value: `${agentStatus?.queueSize ?? 0}`,
       text: `${agentStatus?.runningRuns ?? 0} 个任务运行中，${agentStatus?.failedRuns ?? 0} 个任务失败。`,
       icon: Workflow,
+    },
+    {
+      label: '即梦账号',
+      value: formatNumber(jimengAccountInfo.total_credit, '未登录'),
+      text: `${formatJimengVip(jimengAccountInfo.vip_level)}，近期 ${jimengSummary.totalTasks ?? 0} 条调用记录。`,
+      icon: Clapperboard,
     },
     {
       label: '用户规模',
@@ -925,8 +1104,10 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
   ];
 
   const adminMenuItems = [
-    { id: 'overview', label: '运营概览', icon: BarChart3, description: '用户、Agent 与任务状态' },
-    { id: 'agent', label: 'Agent 控制台', icon: Bot, description: '模型、队列与最近运行' },
+    { id: 'overview', label: '运营概览', icon: BarChart3, description: '用户、创作任务与服务状态' },
+    { id: 'agent', label: '服务配置', icon: Bot, description: '分镜服务、即梦模式与最近运行' },
+    { id: 'jimeng', label: '即梦账号', icon: Clapperboard, description: '会员、积分与调用明细' },
+    { id: 'jimengDocs', label: 'CLI 文档', icon: FileText, description: '官方命令要点与注意事项' },
     { id: 'users', label: '用户管理', icon: Users, description: '账号、角色与登录状态' },
     { id: 'system', label: '系统配置', icon: Settings2, description: '服务状态与后台参数' },
   ];
@@ -1002,7 +1183,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                       进入创作台
                     </button>
                     <button className="secondary-link-button" type="button" onClick={() => switchAdminView('agent')}>
-                      Agent 配置
+                      服务配置
                       <ChevronRight size={16} />
                     </button>
                   </div>
@@ -1052,41 +1233,43 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
               <div className="section-heading">
                 <span>
                   <Bot size={18} />
-                  Agent 控制台
+                  服务配置
                 </span>
                 <small>
-                  {agentConfig?.deepseekApiKeySet ? 'DeepSeek V4 Flash 已配置' : '等待配置 DeepSeek API Key'}
+                  {agentConfig?.deepseekApiKeySet ? '分镜服务已配置' : '等待配置分镜服务 API Key'}
                 </small>
               </div>
 
               <div className="agent-console-grid">
                 <form className="agent-config-form" onSubmit={handleAgentConfigSubmit}>
                 <label className="auth-field">
-                  <span>DeepSeek Base URL</span>
+                  <span>分镜服务 Base URL</span>
                   <div>
                     <Link2 size={17} />
                     <input
+                      type="password"
                       value={agentForm.deepseekBaseUrl}
                       onChange={(event) => updateAgentForm('deepseekBaseUrl', event.target.value)}
-                      placeholder="https://api.deepseek.com"
+                      placeholder="留空则保持当前服务地址"
                     />
                   </div>
                 </label>
 
                 <label className="auth-field">
-                  <span>Agent 模型</span>
+                  <span>分镜服务模型</span>
                   <div>
                     <Bot size={17} />
                     <input
+                      type="password"
                       value={agentForm.deepseekModel}
                       onChange={(event) => updateAgentForm('deepseekModel', event.target.value)}
-                      placeholder="deepseek-v4-flash"
+                      placeholder="留空则保持当前模型"
                     />
                   </div>
                 </label>
 
                 <label className="auth-field">
-                  <span>DeepSeek API Key</span>
+                  <span>分镜服务 API Key</span>
                   <div>
                     <Lock size={17} />
                     <input
@@ -1113,14 +1296,17 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                 </label>
 
                 <label className="auth-field">
-                  <span>Seedance 模型</span>
+                  <span>默认视频模型</span>
                   <div>
                     <Route size={17} />
-                    <input
+                    <select
                       value={agentForm.jimengModel}
                       onChange={(event) => updateAgentForm('jimengModel', event.target.value)}
-                      placeholder="jimeng-video-seedance-2.0"
-                    />
+                    >
+                      {jimengModelOptions.map((option) => (
+                        <option value={option.value} key={option.value}>{option.label}</option>
+                      ))}
+                    </select>
                   </div>
                 </label>
 
@@ -1143,7 +1329,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
 
                 <button className="submit-button">
                   <ShieldCheck size={18} />
-                  保存 Agent 配置
+                  保存服务配置
                 </button>
                 {agentMessage ? <p className="agent-message">{agentMessage}</p> : null}
               </form>
@@ -1151,14 +1337,14 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
               <div className="agent-status-panel">
                 <div className="agent-status-grid">
                   <div className="agent-status-card">
-                    <span>DeepSeek</span>
-                    <strong>{agentStatus?.config?.deepseekModel || 'deepseek-v4-flash'}</strong>
+                    <span>分镜服务</span>
+                    <strong>{agentStatus?.config?.deepseekApiKeySet ? '已配置' : '待配置'}</strong>
                     <small>{agentStatus?.config?.deepseekApiKeySet ? 'API Key 已保存' : '未配置 API Key'}</small>
                   </div>
                   <div className="agent-status-card">
                     <span>即梦 CLI</span>
                     <strong>{agentStatus?.config?.jimengCliAvailable ? '已内置' : '不可用'}</strong>
-                    <small>{agentStatus?.config?.jimengTokenPoolConfigured ? '账号池已配置' : '账号池未配置'}</small>
+                    <small>默认模型：{getJimengModelOption(agentStatus?.config?.jimengModel).shortLabel}</small>
                   </div>
                   <div className="agent-status-card">
                     <span>运行中任务</span>
@@ -1173,13 +1359,13 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                     <small>{(agentStatus?.recentRuns || []).length} 条记录</small>
                   </div>
                   {(agentStatus?.recentRuns || []).length === 0 ? (
-                    <p>还没有 Agent 运行记录。</p>
+                    <p>还没有创作运行记录。</p>
                   ) : (
                     agentStatus.recentRuns.map((run) => (
                       <article className="agent-run-item" key={run.id}>
                         <div>
                           <strong>{run.idea}</strong>
-                          <small>{run.userEmail} / {run.agentModel}</small>
+                          <small>{run.userEmail} / {getJimengModelOption(run.jimengModel).shortLabel}</small>
                         </div>
                         <span className={`status-pill ${run.status === 'failed' ? 'failed' : run.status === 'completed' ? 'done' : 'active'}`}>
                           {run.status}
@@ -1189,6 +1375,174 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                   )}
                 </div>
               </div>
+              </div>
+            </section>
+          ) : null}
+
+          {activeAdminView === 'jimeng' ? (
+            <section className="admin-panel jimeng-admin-panel">
+              <div className="section-heading">
+                <span>
+                  <Clapperboard size={18} />
+                  即梦账号
+                </span>
+                <small>{jimengAccount?.cli?.officialCliAvailable ? '官方 dreamina CLI 已连接' : '等待 CLI 登录'}</small>
+              </div>
+
+              {jimengAccount?.error ? (
+                <div className="api-error">
+                  <AlertTriangle size={15} />
+                  <span>{jimengAccount.error}</span>
+                </div>
+              ) : null}
+
+              <div className="jimeng-account-grid">
+                <article className="jimeng-account-tile primary">
+                  <span>
+                    <Zap size={17} />
+                    剩余积分
+                  </span>
+                  <strong>{formatNumber(jimengAccountInfo.total_credit)}</strong>
+                  <small>来自 dreamina user_credit</small>
+                </article>
+                <article className="jimeng-account-tile">
+                  <span>
+                    <BadgeCheck size={17} />
+                    会员情况
+                  </span>
+                  <strong>{formatJimengVip(jimengAccountInfo.vip_level)}</strong>
+                  <small>账号 ID：{jimengAccountInfo.user_id || '暂无'}</small>
+                </article>
+                <article className="jimeng-account-tile">
+                  <span>
+                    <Workflow size={17} />
+                    近期调用
+                  </span>
+                  <strong>{formatNumber(jimengSummary.totalTasks, '0')}</strong>
+                  <small>
+                    成功 {jimengSummary.successTasks ?? 0} / 失败 {jimengSummary.failedTasks ?? 0}
+                  </small>
+                </article>
+                <article className="jimeng-account-tile">
+                  <span>
+                    <TimerReset size={17} />
+                    近期积分消耗
+                  </span>
+                  <strong>{formatNumber(jimengSummary.recentCreditUsed, '0')}</strong>
+                  <small>按最近 {recentJimengTasks.length} 条调用统计</small>
+                </article>
+                <article className="jimeng-account-tile wide">
+                  <span>
+                    <Route size={17} />
+                    CLI 状态
+                  </span>
+                  <strong>{jimengAccount?.cli?.available ? '可用' : '不可用'}</strong>
+                  <small>{jimengAccount?.cli?.command || '未找到 dreamina 命令'}</small>
+                </article>
+                <article className="jimeng-account-tile wide">
+                  <span>
+                    <Film size={17} />
+                    CLI 版本
+                  </span>
+                  <strong>{jimengAccount?.version?.version || '暂无版本'}</strong>
+                  <small>{jimengAccount?.version?.build_time || '暂无构建时间'}</small>
+                </article>
+              </div>
+
+              <div className="jimeng-task-section">
+                <div className="agent-run-list-head">
+                  <strong>调用明细</strong>
+                  <small>{recentJimengTasks.length} 条最近任务</small>
+                </div>
+                {recentJimengTasks.length === 0 ? (
+                  <p className="jimeng-empty">还没有可展示的即梦调用记录。</p>
+                ) : (
+                  <div className="jimeng-task-table">
+                    <div className="jimeng-task-row jimeng-task-head">
+                      <span>任务</span>
+                      <span>类型</span>
+                      <span>状态</span>
+                      <span>积分</span>
+                      <span>结果 / 权益</span>
+                    </div>
+                    {recentJimengTasks.map((task) => {
+                      const statusMeta = getJimengTaskStatusMeta(task.gen_status);
+                      return (
+                        <div className="jimeng-task-row" key={task.submit_id || `${task.gen_task_type}-${task.fail_reason}`}>
+                          <span>
+                            <strong title={task.submit_id}>{compactSubmitId(task.submit_id)}</strong>
+                            <small>{task.fail_reason || 'CLI 已返回任务结果'}</small>
+                          </span>
+                          <span>{task.gen_task_type || '未知类型'}</span>
+                          <span>
+                            <em className={`status-pill ${statusMeta.tone}`}>{statusMeta.label}</em>
+                          </span>
+                          <span>{formatNumber(getJimengTaskCredit(task), '0')}</span>
+                          <span>
+                            <strong>{getJimengTaskVideoMeta(task)}</strong>
+                            <small>{getJimengTaskBenefit(task)}</small>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : null}
+
+          {activeAdminView === 'jimengDocs' ? (
+            <section className="admin-panel jimeng-docs-panel">
+              <div className="section-heading">
+                <span>
+                  <FileText size={18} />
+                  即梦 CLI 文档要点
+                </span>
+                <small>整理自官方 CLI 帮助、安装脚本与随 CLI 分发的 SKILL.md</small>
+              </div>
+
+              <div className="jimeng-docs-grid">
+                {jimengCliDocs.map((section) => (
+                  <article className="jimeng-doc-card" key={section.title}>
+                    <span>
+                      <FileText size={16} />
+                      {section.title}
+                    </span>
+                    <ul>
+                      {section.points.map((point) => (
+                        <li key={point}>{point}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+
+              <div className="jimeng-model-reference">
+                <div className="agent-run-list-head">
+                  <strong>模型选择参考</strong>
+                  <small>速度、质量和成本为产品侧倾向说明，实际积分消耗以调用明细为准</small>
+                </div>
+                <div className="jimeng-model-table">
+                  <div className="jimeng-model-row jimeng-model-head">
+                    <span>模型</span>
+                    <span>速度</span>
+                    <span>质量</span>
+                    <span>成本</span>
+                    <span>适合场景</span>
+                  </div>
+                  {jimengModelOptions.map((option) => (
+                    <div className="jimeng-model-row" key={option.value}>
+                      <span>
+                        <strong>{option.label}</strong>
+                        <small>{option.value}</small>
+                      </span>
+                      <span>{option.speed}</span>
+                      <span>{option.quality}</span>
+                      <span>{option.cost}</span>
+                      <span>{option.description}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </section>
           ) : null}
@@ -1270,16 +1624,16 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                 <article className="admin-system-card">
                   <span>
                     <Bot size={17} />
-                    Agent 模式
+                    服务模式
                   </span>
                   <strong>{agentConfig?.jimengMode || agentForm.jimengMode}</strong>
-                  <p>可在 Agent 控制台里调整即梦接入模式与 DeepSeek 模型参数。</p>
+                  <p>可在服务配置里调整即梦接入模式、默认视频模型与分镜服务参数。</p>
                 </article>
               </div>
               <div className="admin-system-actions">
                 <button className="primary-button" type="button" onClick={() => switchAdminView('agent')}>
                   <Bot size={18} />
-                  配置 Agent
+                  配置服务
                 </button>
                 <button className="secondary-link-button" type="button" onClick={refreshAdminData} disabled={isLoading}>
                   {isLoading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
@@ -1354,6 +1708,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const [segmentDuration, setSegmentDuration] = useState(15);
   const [style, setStyle] = useState('电影感');
   const [ratio, setRatio] = useState('16:9');
+  const [jimengModel, setJimengModel] = useState('seedance2.0fast');
   const [images, setImages] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
@@ -1363,7 +1718,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
   const [activeRunId, setActiveRunId] = useState('');
   const [isConfirming, setIsConfirming] = useState(false);
-  const [apiStatus, setApiStatus] = useState('正在连接服务器...');
+  const [apiStatus, setApiStatus] = useState('正在连接创作服务...');
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
   const [runStatus, setRunStatus] = useState('idle');
@@ -1374,9 +1729,21 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     () => durationOptions.find((item) => item.value === duration),
     [duration],
   );
+  const selectedDurationIndex = Math.max(
+    durationOptions.findIndex((item) => item.value === duration),
+    0,
+  );
+  const selectedJimengModel = getJimengModelOption(jimengModel);
 
   const completeCount = scenes.filter((scene) => scene.status === 'done').length;
   const runLocked = isGenerating || isConfirming || runStatus === 'awaiting_confirmation';
+  const controlsLocked = isGenerating || isConfirming;
+  const isStoryboardReview = runStatus === 'awaiting_confirmation' && candidates.length > 0;
+  const storyboardTotalDuration = scenes.reduce((sum, scene) => sum + Number(scene.duration || 0), 0);
+  const storyboardDurationValid = storyboardTotalDuration === duration;
+  const storyboardPromptsValid = scenes.every(
+    (scene) => scene.title.trim().length > 0 && scene.prompt.trim().length >= 10 && Number(scene.duration) >= 4,
+  );
 
   useEffect(() => {
     const activeImageUrls = imageUrls.current;
@@ -1384,11 +1751,11 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
 
     apiRequest('/health')
       .then((health) => {
-        if (isMounted) setApiStatus(`Agent Endpoint: ${health.status}`);
+        if (isMounted) setApiStatus(`创作服务：${health.status}`);
       })
       .catch((error) => {
         if (isMounted) {
-          setApiStatus('Agent Endpoint: Offline');
+          setApiStatus('创作服务离线');
           setApiError(error.message);
         }
       });
@@ -1434,7 +1801,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
         }))
       : scenesRef.current;
 
-    if (latestRun.status === 'awaiting_confirmation' && latestRun.candidates?.length === 3) {
+    if (latestRun.status === 'awaiting_confirmation' && latestRun.candidates?.length > 0) {
       const firstCandidate = latestRun.candidates[0];
       setCandidates(latestRun.candidates);
       setSelectedCandidateId(firstCandidate.id);
@@ -1446,14 +1813,14 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     setProgress(latestRun.progress ?? 0);
     setRunStatus(latestRun.status);
     setStageIndex(agentStageIndexes[latestRun.stage] ?? 0);
-    setApiStatus(`Agent · ${agentStageLabels[latestRun.stage] || latestRun.stage}`);
+    setApiStatus(`任务状态：${agentStageLabels[latestRun.stage] || latestRun.stage}`);
 
     if (latestRun.finalVideoUrl) {
       setFinalVideoUrl(latestRun.finalVideoUrl);
     }
 
     if (latestRun.status === 'failed') {
-      setApiError(latestRun.error || 'Agent 未能完成这次任务，请稍后重试。');
+      setApiError(latestRun.error || '任务未能完成，请稍后重试。');
     }
 
     return ['awaiting_confirmation', 'completed', 'failed'].includes(latestRun.status);
@@ -1506,8 +1873,8 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     event.target.value = '';
   }
 
-  async function handleSubmit() {
-    if (runLocked || !idea.trim()) return;
+  async function handleSubmit({ regenerate = false } = {}) {
+    if ((!regenerate && runLocked) || isGenerating || isConfirming || !idea.trim()) return;
 
     clearTaskTimers();
 
@@ -1557,13 +1924,14 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
           segmentDuration,
           style,
           ratio,
+          jimengModel,
           imageNames: uploadedImages.map((image) => image.name),
           imageIds: uploadedImages.map((image) => image.uploadId),
         }),
       });
 
       setActiveRunId(agentRun.id);
-      setApiStatus(`Agent Run: ${agentRun.id}`);
+      setApiStatus(`任务已创建：${agentRun.id}`);
       syncAgentRun(agentRun);
       timers.current = [setTimeout(() => pollAgentRun(agentRun.id), 400)];
     } catch (error) {
@@ -1575,23 +1943,27 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     }
   }
 
-  function selectCandidate(candidateId) {
-    const candidate = candidates.find((item) => item.id === candidateId);
-    if (!candidate) return;
-    setSelectedCandidateId(candidateId);
-    const editableScenes = candidate.scenes.map((scene) => ({ ...scene, status: 'locked', progress: 0 }));
-    scenesRef.current = editableScenes;
-    setScenes(editableScenes);
+  function handleRegenerateStoryboard() {
+    handleSubmit({ regenerate: true });
   }
 
   function updateDraftScene(index, field, value) {
-    setScenes((current) => current.map((scene, sceneIndex) => (
-      sceneIndex === index ? { ...scene, [field]: value } : scene
+    const nextValue = field === 'duration' ? Number(value) : value;
+    const nextScenes = scenesRef.current.map((scene, sceneIndex) => (
+      sceneIndex === index ? { ...scene, [field]: nextValue } : scene
+    ));
+
+    scenesRef.current = nextScenes;
+    setScenes(nextScenes);
+    setCandidates((currentCandidates) => currentCandidates.map((candidate) => (
+      candidate.id === selectedCandidateId
+        ? { ...candidate, scenes: nextScenes }
+        : candidate
     )));
   }
 
   async function handleConfirmStoryboard() {
-    if (!activeRunId || !selectedCandidateId || isConfirming) return;
+    if (!activeRunId || !selectedCandidateId || isConfirming || !storyboardDurationValid) return;
     setIsConfirming(true);
     setIsGenerating(true);
     setApiError('');
@@ -1636,6 +2008,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     setSegmentDuration(15);
     setStyle('电影感');
     setRatio('16:9');
+    setJimengModel('seedance2.0fast');
     setImages([]);
     setScenes(draftScenes);
     setCandidates([]);
@@ -1648,7 +2021,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     setApiError('');
     setFinalVideoUrl('');
     setRunStatus('idle');
-    setApiStatus('Agent Endpoint: healthy');
+    setApiStatus('创作服务已连接');
   }
 
   return (
@@ -1757,18 +2130,34 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
               <Clock3 size={16} />
               <span>目标时长</span>
             </div>
-            <div className="segmented-control duration-control">
-              {durationOptions.map((option) => (
-                <button
-                  className={duration === option.value ? 'selected' : ''}
-                  key={option.value}
-                  onClick={() => setDuration(option.value)}
-                  disabled={runLocked}
-                >
-                  <strong>{option.label}</strong>
-                  <small>{Math.ceil(option.value / segmentDuration)}段</small>
-                </button>
-              ))}
+            <div className="duration-slider-control">
+              <div className="duration-slider-value">
+                <strong>{selectedDuration?.label}</strong>
+                <span>预计 {Math.ceil(duration / segmentDuration)} 段</span>
+              </div>
+              <input
+                aria-label="目标时长"
+                type="range"
+                min="0"
+                max={durationOptions.length - 1}
+                step="1"
+                value={selectedDurationIndex}
+                onChange={(event) => setDuration(durationOptions[Number(event.target.value)].value)}
+                disabled={runLocked}
+              />
+              <div className="duration-slider-labels">
+                {durationOptions.map((option) => (
+                  <button
+                    className={duration === option.value ? 'selected' : ''}
+                    key={option.value}
+                    onClick={() => setDuration(option.value)}
+                    disabled={runLocked}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1836,6 +2225,30 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
             </div>
           </div>
 
+          <div className="control-group">
+            <div className="control-head">
+              <Zap size={16} />
+              <span>生成模型</span>
+            </div>
+            <div className="model-choice-grid">
+              {jimengModelOptions.map((option) => (
+                <button
+                  className={jimengModel === option.value ? 'selected' : ''}
+                  key={option.value}
+                  onClick={() => setJimengModel(option.value)}
+                  disabled={runLocked}
+                  type="button"
+                >
+                  <span>
+                    <strong>{option.shortLabel}</strong>
+                    <em>{option.speed} / {option.quality} / 成本{option.cost}</em>
+                  </span>
+                  <small>{option.description}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="advanced-row">
             <div>
               <Lock size={15} />
@@ -1847,15 +2260,15 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
             </div>
             <div>
               <Bot size={15} />
-              <span>Agent 规划</span>
+              <span>智能分镜</span>
             </div>
           </div>
 
           <button className="submit-button" onClick={handleSubmit} disabled={!idea.trim() || runLocked}>
             {isGenerating ? <Loader2 className="spin" size={18} /> : <WandSparkles size={18} />}
             {isGenerating
-              ? runStatus === 'generating' ? '即梦生成中' : 'DeepSeek 编写中'
-              : runStatus === 'awaiting_confirmation' ? '请先确认分镜' : '生成三套候选分镜'}
+              ? runStatus === 'generating' ? '即梦生成中' : '正在编写分镜'
+              : runStatus === 'awaiting_confirmation' ? '请先确认分镜' : '生成分镜剧本'}
           </button>
           {apiError ? (
             <div className="api-error">
@@ -1878,7 +2291,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                 <Play size={18} />
                 成片预览
               </span>
-              <small>{ratio} / {selectedDuration?.label}</small>
+              <small>{ratio} / {selectedDuration?.label} / {selectedJimengModel.shortLabel}</small>
             </div>
             <div className="video-preview">
               {finalVideoUrl ? (
@@ -1941,17 +2354,68 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
         </section>
       </main>
 
+      {isStoryboardReview ? (
+        <section className="storyboard-review-panel">
+          <div className="section-heading">
+            <span>
+              <Workflow size={18} />
+              分镜剧本
+            </span>
+            <small>查看生成结果，可逐段修改，也可以重新生成一版</small>
+          </div>
+          <div className="storyboard-plan-summary">
+            <span>
+              <strong>{candidates[0]?.title || '分镜剧本'}</strong>
+              <small>{candidates[0]?.summary || '已生成一套可编辑分镜'}</small>
+            </span>
+            <em>{scenes.length} 段 / {storyboardTotalDuration} 秒 / {selectedJimengModel.label}</em>
+          </div>
+          <div className="storyboard-submit-row">
+            <div>
+              <strong>当前分镜总长 {storyboardTotalDuration} / {duration} 秒</strong>
+              <span>
+                {storyboardDurationValid
+                  ? '时长匹配，可以提交。'
+                  : '请调整单段时长，让总时长与目标时长一致。'}
+              </span>
+            </div>
+            <button
+              className="secondary-link-button"
+              onClick={handleRegenerateStoryboard}
+              disabled={controlsLocked || !idea.trim()}
+              type="button"
+            >
+              {isGenerating ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+              重新生成分镜
+            </button>
+            <button
+              className="primary-button"
+              onClick={handleConfirmStoryboard}
+              disabled={isConfirming || !storyboardDurationValid || !storyboardPromptsValid}
+              type="button"
+            >
+              {isConfirming ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
+              {isConfirming ? '正在提交' : '确认提交'}
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <section className="timeline-panel">
         <div className="section-heading">
           <span>
             <Film size={18} />
             分镜时间线
           </span>
-          <small>每段最长 15 秒，共 {scenes.length} 段</small>
+          <small>
+            {isStoryboardReview
+              ? '当前分镜可编辑，确认后将按顺序生成'
+              : `每段最长 15 秒，共 ${scenes.length} 段`}
+          </small>
         </div>
         <div className="scene-list">
           {scenes.map((scene, index) => (
-            <article className="scene-card" key={scene.id}>
+            <article className={`scene-card ${isStoryboardReview ? 'editable' : ''}`} key={scene.id}>
               <img
                 className="scene-card-image"
                 src={sceneVisuals[index % sceneVisuals.length]}
@@ -1961,10 +2425,28 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
               <div className="scene-index">{scene.number}</div>
               <div className="scene-main">
                 <div className="scene-title-row">
-                  <strong>{scene.title}</strong>
+                  {isStoryboardReview ? (
+                    <input
+                      aria-label={`分镜 ${scene.number} 标题`}
+                      className="scene-title-input"
+                      value={scene.title}
+                      onChange={(event) => updateDraftScene(index, 'title', event.target.value)}
+                    />
+                  ) : (
+                    <strong>{scene.title}</strong>
+                  )}
                   <StatusPill status={scene.status} />
                 </div>
-                <p>{scene.prompt}</p>
+                {isStoryboardReview ? (
+                  <textarea
+                    aria-label={`分镜 ${scene.number} 提示词`}
+                    className="scene-prompt-editor"
+                    value={scene.prompt}
+                    onChange={(event) => updateDraftScene(index, 'prompt', event.target.value)}
+                  />
+                ) : (
+                  <p>{scene.prompt}</p>
+                )}
                 {scene.error ? <small className="scene-error">{scene.error}</small> : null}
                 <div className="mini-progress">
                   <span style={{ width: `${scene.progress}%` }} />
@@ -1976,7 +2458,24 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                   </a>
                 ) : null}
               </div>
-              <div className="scene-time">{scene.time}</div>
+              <div className="scene-time">
+                {isStoryboardReview ? (
+                  <label className="scene-duration-edit">
+                    <span>时长</span>
+                    <input
+                      aria-label={`分镜 ${scene.number} 时长`}
+                      min="4"
+                      max="15"
+                      type="number"
+                      value={scene.duration}
+                      onChange={(event) => updateDraftScene(index, 'duration', event.target.value)}
+                    />
+                    <em>秒</em>
+                  </label>
+                ) : (
+                  scene.time
+                )}
+              </div>
             </article>
           ))}
         </div>
