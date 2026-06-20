@@ -1,0 +1,128 @@
+.credit-console {
+  display: grid;
+  grid-template-columns: minmax(11rem, 0.72fr) minmax(0, 1.45fr);
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.credit-balance-block {
+  display: grid;
+  align-content: center;
+  gap: 0.32rem;
+  min-width: 0;
+}
+
+.credit-balance-block span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #9de9ff;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.credit-balance-block strong {
+  color: #ffffff;
+  font-size: 1.85rem;
+  line-height: 1;
+}
+
+.credit-balance-block small {
+  color: #9aa7b8;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.credit-balance-block small.warning {
+  color: #fbbf24;
+}
+
+.recharge-package-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.recharge-package-row button {
+  display: grid;
+  gap: 0.32rem;
+  min-height: 4.5rem;
+  padding: 0.58rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0.7rem;
+  background: rgba(255, 255, 255, 0.045);
+  color: #dbeafe;
+  text-align: left;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.recharge-package-row button.featured {
+  border-color: rgba(34, 197, 94, 0.42);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.recharge-package-row button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(56, 189, 248, 0.48);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.recharge-package-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.recharge-package-row span,
+.recharge-package-row small {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.recharge-package-row strong {
+  color: #ffffff;
+  font-size: 0.8rem;
+}
+
+.recharge-package-row em {
+  flex: 0 0 auto;
+  color: #86efac;
+  font-size: 0.62rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.recharge-package-row small {
+  color: #9aa7b8;
+  font-size: 0.74rem;
+}
+
+.recharge-package-row del {
+  color: #7a8798;
+}
+
+.recharge-package-row b {
+  color: #7dd3fc;
+}
+
+@media (max-width: 900px) {
+  .credit-console {
+    grid-template-columns: 1fr;
+  }
+
+  .recharge-package-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .recharge-package-row {
+    grid-template-columns: 1fr;
+  }
+}

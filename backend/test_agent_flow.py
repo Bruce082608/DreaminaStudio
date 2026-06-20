@@ -81,6 +81,7 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "load_agent_settings", return_value=mock_settings),
             patch.object(main, "MOCK_GENERATION_STEP_SECONDS", 0.001),
             patch.object(main, "MOCK_GENERATION_ERROR_RATE", 0),
+            patch.object(main, "charge_user_credits"),
         ):
             background_tasks = BackgroundTasks()
             current_user = main.UserRecord(
@@ -113,6 +114,7 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed_run.status, "completed")
         self.assertEqual(completed_run.stage, "completed")
         self.assertEqual(completed_run.progress, 100)
+        self.assertEqual(completed_run.creditCost, 60)
         self.assertTrue(completed_run.finalVideoUrl)
         self.assertTrue(all(scene.status == "completed" for scene in completed_run.scenes))
 
@@ -194,6 +196,42 @@ Dreamina CLI
         self.assertIsInstance(parsed, list)
         self.assertEqual(len(parsed), 2)
         self.assertEqual(parsed[1]["submit_id"], "second")
+
+    def test_recharge_and_generation_charge_update_balance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            users_file = data_dir / "users.json"
+            transactions_file = data_dir / "credit_transactions.json"
+            user = main.UserRecord(
+                id="user-credit",
+                name="积分用户",
+                email="credit@example.com",
+                passwordHash="not-used",
+                creditBalance=15,
+                createdAt=main.time.time(),
+            )
+
+            with (
+                patch.object(main, "DATA_DIR", data_dir),
+                patch.object(main, "USERS_FILE", users_file),
+                patch.object(main, "TRANSACTIONS_FILE", transactions_file),
+            ):
+                main.save_users({user.email: user})
+
+                recharge = main.recharge_user_credits(user.email, "first_trial_50")
+                recharged_user = main.load_users()[user.email]
+                self.assertEqual(recharge.amount, 50)
+                self.assertEqual(recharged_user.creditBalance, 65)
+                self.assertTrue(main.user_has_recharged(recharged_user))
+
+                cost = main.calculate_video_credit_cost("seedance2.0fast", [15, 15])
+                debit = main.charge_user_credits(user.email, cost, "测试扣费", run_id="agent-credit")
+                charged_user = main.load_users()[user.email]
+
+                self.assertEqual(cost, 60)
+                self.assertEqual(debit.amount, -60)
+                self.assertEqual(charged_user.creditBalance, 5)
+                self.assertEqual(len(main.load_credit_transactions()), 2)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ import {
   ChevronRight,
   Clapperboard,
   Clock3,
+  Coins,
+  CreditCard,
   Download,
   Film,
   FileText,
@@ -40,6 +42,27 @@ import {
   Workflow,
   Zap,
 } from 'lucide-react';
+import CreditConsole from './components/CreditConsole';
+import {
+  calculateCreditCost,
+  durationOptions,
+  getJimengModelOption,
+  jimengCliDocs,
+  jimengModelOptions,
+  ratioOptions,
+  segmentDurationOptions,
+  styleOptions,
+} from './config/creation';
+import {
+  compactSubmitId,
+  formatDate,
+  formatJimengVip,
+  formatNumber,
+  getJimengTaskBenefit,
+  getJimengTaskCredit,
+  getJimengTaskStatusMeta,
+  getJimengTaskVideoMeta,
+} from './utils/formatters';
 import './App.css';
 
 const HOME_ROUTE = '#/';
@@ -81,114 +104,6 @@ function readStoredAuth() {
 function BrandLogo() {
   return <img className="brand-logo-image" src="/dreamina-logo.png" alt="" />;
 }
-
-const durationOptions = [
-  { label: '15秒', value: 15 },
-  { label: '30秒', value: 30 },
-  { label: '45秒', value: 45 },
-  { label: '1分钟', value: 60 },
-  { label: '2分钟', value: 120 },
-  { label: '3分钟', value: 180 },
-  { label: '5分钟', value: 300 },
-  { label: '7分钟', value: 420 },
-  { label: '10分钟', value: 600 },
-];
-
-const segmentDurationOptions = [5, 10, 15];
-
-const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
-const ratioOptions = ['16:9', '9:16', '1:1'];
-
-const jimengModelOptions = [
-  {
-    value: 'seedance2.0fast',
-    label: 'Seedance 2.0 Fast',
-    shortLabel: 'Fast',
-    speed: '更快',
-    quality: '标准',
-    cost: '较低',
-    description: '适合草稿、快速验证和批量生成。',
-  },
-  {
-    value: 'seedance2.0',
-    label: 'Seedance 2.0',
-    shortLabel: '标准',
-    speed: '均衡',
-    quality: '高',
-    cost: '中',
-    description: '适合大多数正式创作任务。',
-  },
-  {
-    value: 'seedance2.0mini',
-    label: 'Seedance 2.0 Mini',
-    shortLabel: 'Mini',
-    speed: '最快',
-    quality: '轻量',
-    cost: '低',
-    description: '适合低成本预览和结构测试。',
-  },
-  {
-    value: 'seedance2.0_vip',
-    label: 'Seedance 2.0 VIP',
-    shortLabel: 'VIP',
-    speed: '较慢',
-    quality: '最高',
-    cost: '高',
-    description: '适合质量优先的关键片段，可支持 1080p。',
-  },
-  {
-    value: 'seedance2.0fast_vip',
-    label: 'Seedance 2.0 Fast VIP',
-    shortLabel: 'Fast VIP',
-    speed: '快',
-    quality: '高',
-    cost: '较高',
-    description: '适合想兼顾速度和质量的正式片段。',
-  },
-];
-
-const jimengCliDocs = [
-  {
-    title: '登录与账号',
-    points: [
-      '首次使用先运行 dreamina login；本地会保存 OAuth 登录态。',
-      'headless 登录会输出 verification_uri、user_code、device_code，需要再用 checklogin 完成登录。',
-      'dreamina user_credit 可读取账号剩余积分，dreamina list_task 可查看最近任务。',
-    ],
-  },
-  {
-    title: '视频生成命令',
-    points: [
-      'prompt-only 视频使用 dreamina text2video。',
-      '带参考图、视频或音频时使用 dreamina multimodal2video；本地文件会自动上传。',
-      '异步任务可用 --poll 短暂等待；后续用 dreamina query_result --submit_id 查询。',
-    ],
-  },
-  {
-    title: '模型与限制',
-    points: [
-      '官方 CLI 支持 seedance2.0、seedance2.0fast、seedance2.0_vip、seedance2.0fast_vip、seedance2.0mini。',
-      '单段视频 duration 支持 4-15 秒，本网站会按目标总长拆分为多段顺序生成。',
-      'ratio 支持 1:1、3:4、16:9、4:3、9:16、21:9；当前创作台开放常用画幅。',
-    ],
-  },
-  {
-    title: '素材与分辨率',
-    points: [
-      'multimodal2video 至少需要一个 image 或 video 输入。',
-      '参考素材限制：image<=9、video<=3、audio<=3；audio 需为 2-15 秒。',
-      'seedance2.0_vip 支持 720p 或 1080p，其余模型官方帮助标注为 720p。',
-    ],
-  },
-  {
-    title: '计费与风险',
-    points: [
-      '所有真实生成都会消耗积分，测试前应先确认账号余额。',
-      'CLI 帮助不直接给出固定积分单价，实际消耗以 list_task 返回的 credit_count 为准。',
-      '部分高内容安全风险模型首次使用前可能需要在 Web 端授权；遇到 AigcComplianceConfirmationRequired 后先完成网页确认再重试。',
-    ],
-  },
-];
 
 const visualAssets = {
   heroConsole: new URL('./assets/gallery/hero-console.jpg', import.meta.url).href,
@@ -703,79 +618,6 @@ async function apiRequest(path, options = {}) {
   return response.json();
 }
 
-function formatDate(timestamp) {
-  if (!timestamp) return '尚未登录';
-
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timestamp * 1000));
-}
-
-function formatNumber(value, emptyLabel = '暂无数据') {
-  if (value === null || value === undefined || value === '') return emptyLabel;
-  const number = Number(value);
-  if (!Number.isFinite(number)) return String(value);
-  return new Intl.NumberFormat('zh-CN').format(number);
-}
-
-function formatJimengVip(level) {
-  const vipMap = {
-    maestro: '高级会员 Maestro',
-    premium: '高级会员',
-    pro: 'Pro 会员',
-    standard: '标准账号',
-  };
-  return vipMap[level] || level || '未登录';
-}
-
-function getJimengTaskStatusMeta(status) {
-  const statusMap = {
-    success: { label: '成功', tone: 'done' },
-    fail: { label: '失败', tone: 'failed' },
-    failed: { label: '失败', tone: 'failed' },
-    running: { label: '生成中', tone: 'active' },
-    processing: { label: '生成中', tone: 'active' },
-    pending: { label: '等待中', tone: 'queued' },
-  };
-  return statusMap[status] || { label: status || '未知', tone: 'queued' };
-}
-
-function compactSubmitId(submitId) {
-  if (!submitId) return '无任务 ID';
-  const value = String(submitId);
-  if (value.length <= 18) return value;
-  return `${value.slice(0, 8)}...${value.slice(-6)}`;
-}
-
-function getJimengTaskCredit(task) {
-  return task?.commerce_info?.credit_count ?? 0;
-}
-
-function getJimengTaskBenefit(task) {
-  const triplets = task?.commerce_info?.triplets;
-  if (Array.isArray(triplets) && triplets.length > 0) {
-    return triplets.map((item) => item?.benefit_type).filter(Boolean).join(' / ') || '未标记权益';
-  }
-  return task?.commerce_info?.triplet?.benefit_type || '未标记权益';
-}
-
-function getJimengTaskVideoMeta(task) {
-  const video = task?.result_json?.videos?.[0];
-  if (!video) return task?.fail_reason || '暂无视频结果';
-
-  const size = video.width && video.height ? `${video.width}x${video.height}` : '未知尺寸';
-  const duration = Number.isFinite(Number(video.duration)) ? `${Number(video.duration).toFixed(1)}秒` : '未知时长';
-  const fps = video.fps ? `${video.fps}fps` : '未知帧率';
-  return `${size} · ${duration} · ${fps} · ${video.format || 'mp4'}`;
-}
-
-function getJimengModelOption(value) {
-  return jimengModelOptions.find((option) => option.value === value) || jimengModelOptions[0];
-}
-
 function AuthPage({ mode, onAuthSuccess, onSwitchMode, onShowHome }) {
   const isRegister = mode === 'register';
   const [name, setName] = useState('');
@@ -829,16 +671,16 @@ function AuthPage({ mode, onAuthSuccess, onSwitchMode, onShowHome }) {
           </div>
           <h1>{isRegister ? '加入 Dreamina Studio 创作台' : '欢迎回到创作中枢'}</h1>
           <p>
-            登录后即可进入 AI 长视频创作台。管理员账号还可以进入后台，查看用户增长、活跃情况和注册名单。
+            登录后即可进入 AI 长视频创作台。新用户注册赠送 15 积分，可用于提交真实视频生成任务。
           </p>
           <div className="auth-proof-grid">
             <div>
-              <Users size={18} />
-              <span>用户注册沉淀</span>
+              <Coins size={18} />
+              <span>注册赠送积分</span>
             </div>
             <div>
-              <BarChart3 size={18} />
-              <span>后台数据总览</span>
+              <CreditCard size={18} />
+              <span>按需充值创作</span>
             </div>
             <div>
               <Lock size={18} />
@@ -1071,6 +913,8 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     { label: '7 日登录', value: stats?.recentLogins ?? '-', icon: CalendarClock },
     { label: '分镜任务', value: stats?.generatedShots ?? '-', icon: Clapperboard },
     { label: '创作任务', value: stats?.agentRuns ?? '-', icon: Bot },
+    { label: '用户积分', value: formatNumber(stats?.userCreditBalance ?? 0), icon: Coins },
+    { label: '充值收入', value: `${formatNumber(stats?.rechargeRevenueCny ?? 0)}元`, icon: CreditCard },
     { label: '运行中', value: stats?.activeAgentRuns ?? '-', icon: Loader2 },
     { label: '失败任务', value: stats?.failedAgentRuns ?? '-', icon: AlertTriangle },
     { label: '队列长度', value: stats?.queueSize ?? '-', icon: Workflow },
@@ -1098,7 +942,7 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
     {
       label: '用户规模',
       value: `${stats?.activeUsers ?? 0}/${stats?.totalUsers ?? 0}`,
-      text: '活跃账号 / 注册账号，便于快速判断早期使用情况。',
+      text: `站内积分余额 ${formatNumber(stats?.userCreditBalance ?? 0)}，累计充值 ${formatNumber(stats?.rechargeRevenueCny ?? 0)} 元。`,
       icon: Users,
     },
   ];
@@ -1524,24 +1368,24 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                 </div>
                 <div className="jimeng-model-table">
                   <div className="jimeng-model-row jimeng-model-head">
-                    <span>模型</span>
-                    <span>速度</span>
-                    <span>质量</span>
-                    <span>成本</span>
-                    <span>适合场景</span>
-                  </div>
+	                    <span>模型</span>
+	                    <span>速度</span>
+	                    <span>质量</span>
+	                    <span>定价</span>
+	                    <span>扣费规则</span>
+	                  </div>
                   {jimengModelOptions.map((option) => (
                     <div className="jimeng-model-row" key={option.value}>
                       <span>
                         <strong>{option.label}</strong>
                         <small>{option.value}</small>
                       </span>
-                      <span>{option.speed}</span>
-                      <span>{option.quality}</span>
-                      <span>{option.cost}</span>
-                      <span>{option.description}</span>
-                    </div>
-                  ))}
+	                      <span>{option.speed}</span>
+	                      <span>{option.quality}</span>
+	                      <span>{option.cost}</span>
+	                      <span>每 5 秒片段 {option.pricePer5} 积分</span>
+	                    </div>
+	                  ))}
                 </div>
               </div>
             </section>
@@ -1569,6 +1413,8 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                   <span>用户</span>
                   <span>角色</span>
                   <span>状态</span>
+                  <span>积分</span>
+                  <span>充值</span>
                   <span>登录次数</span>
                   <span>最近登录</span>
                 </div>
@@ -1586,6 +1432,11 @@ function AdminPage({ auth, onShowIntro, onShowCreate, onLogout }) {
                     </em>
                     <em className={`status-badge ${userItem.status === 'active' ? 'active' : 'locked'}`}>
                       {userItem.status === 'active' ? '正常' : '停用'}
+                    </em>
+                    <em>{formatNumber(userItem.creditBalance ?? 0)}</em>
+                    <em>
+                      {formatNumber(userItem.rechargeCount ?? 0)} 次
+                      <small>{formatNumber(userItem.lifetimeRechargeCny ?? 0)} 元</small>
                     </em>
                     <em>{userItem.loginCount}</em>
                     <em>{formatDate(userItem.lastLoginAt)}</em>
@@ -1722,6 +1573,9 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
   const [runStatus, setRunStatus] = useState('idle');
+  const [billing, setBilling] = useState(null);
+  const [billingError, setBillingError] = useState('');
+  const [rechargingPackageId, setRechargingPackageId] = useState('');
 
   scenesRef.current = scenes;
 
@@ -1734,6 +1588,10 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
     0,
   );
   const selectedJimengModel = getJimengModelOption(jimengModel);
+  const estimatedCreditCost = useMemo(
+    () => calculateCreditCost(jimengModel, [duration]),
+    [jimengModel, duration],
+  );
 
   const completeCount = scenes.filter((scene) => scene.status === 'done').length;
   const runLocked = isGenerating || isConfirming || runStatus === 'awaiting_confirmation';
@@ -1744,6 +1602,13 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   const storyboardPromptsValid = scenes.every(
     (scene) => scene.title.trim().length > 0 && scene.prompt.trim().length >= 10 && Number(scene.duration) >= 4,
   );
+  const storyboardCreditCost = useMemo(
+    () => calculateCreditCost(jimengModel, scenes.map((scene) => scene.duration)),
+    [jimengModel, scenes],
+  );
+  const activeCreditCost = isStoryboardReview ? storyboardCreditCost : estimatedCreditCost;
+  const creditBalance = billing?.balance ?? auth?.user?.creditBalance ?? 0;
+  const hasEnoughCredits = creditBalance >= activeCreditCost;
 
   useEffect(() => {
     const activeImageUrls = imageUrls.current;
@@ -1769,6 +1634,25 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
+    apiRequest('/billing/me', { authToken: auth?.token })
+      .then((nextBilling) => {
+        if (isMounted) {
+          setBilling(nextBilling);
+          setBillingError('');
+        }
+      })
+      .catch((error) => {
+        if (isMounted) setBillingError(error.message);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [auth?.token]);
+
+  useEffect(() => {
     if (Math.ceil(duration / segmentDuration) > 40) {
       setSegmentDuration(15);
     }
@@ -1785,6 +1669,32 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
   function clearTaskTimers() {
     timers.current.forEach((timer) => clearTimeout(timer));
     timers.current = [];
+  }
+
+  async function refreshBilling() {
+    const nextBilling = await apiRequest('/billing/me', { authToken: auth?.token });
+    setBilling(nextBilling);
+    setBillingError('');
+    return nextBilling;
+  }
+
+  async function handleRecharge(packageId) {
+    if (rechargingPackageId) return;
+    setRechargingPackageId(packageId);
+    setBillingError('');
+
+    try {
+      const nextBilling = await apiRequest('/billing/recharge', {
+        method: 'POST',
+        authToken: auth?.token,
+        body: JSON.stringify({ packageId }),
+      });
+      setBilling(nextBilling);
+    } catch (error) {
+      setBillingError(error.message);
+    } finally {
+      setRechargingPackageId('');
+    }
   }
 
   function syncAgentRun(latestRun) {
@@ -1964,6 +1874,10 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
 
   async function handleConfirmStoryboard() {
     if (!activeRunId || !selectedCandidateId || isConfirming || !storyboardDurationValid) return;
+    if (!hasEnoughCredits) {
+      setApiError(`积分不足，本次预计需要 ${storyboardCreditCost} 积分，当前余额 ${creditBalance} 积分。`);
+      return;
+    }
     setIsConfirming(true);
     setIsGenerating(true);
     setApiError('');
@@ -1985,6 +1899,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
         },
       );
       syncAgentRun(confirmedRun);
+      await refreshBilling();
       timers.current = [setTimeout(() => pollAgentRun(activeRunId), 400)];
     } catch (error) {
       setApiError(error.message);
@@ -2125,6 +2040,16 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
             </div>
           </div>
 
+          <CreditConsole
+            activeCreditCost={activeCreditCost}
+            balance={creditBalance}
+            billing={billing}
+            billingError={billingError}
+            hasEnoughCredits={hasEnoughCredits}
+            onRecharge={handleRecharge}
+            rechargingPackageId={rechargingPackageId}
+          />
+
           <div className="control-group">
             <div className="control-head">
               <Clock3 size={16} />
@@ -2240,10 +2165,10 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
                   type="button"
                 >
                   <span>
-                    <strong>{option.shortLabel}</strong>
-                    <em>{option.speed} / {option.quality} / 成本{option.cost}</em>
+                    <strong>{option.label}</strong>
+                    <em>{option.priceLabel}</em>
                   </span>
-                  <small>{option.description}</small>
+                  <small>当前时长预计 {calculateCreditCost(option.value, [duration])} 积分</small>
                 </button>
               ))}
             </div>
@@ -2375,7 +2300,7 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
               <strong>当前分镜总长 {storyboardTotalDuration} / {duration} 秒</strong>
               <span>
                 {storyboardDurationValid
-                  ? '时长匹配，可以提交。'
+                  ? `确认提交将扣除 ${storyboardCreditCost} 积分，当前余额 ${creditBalance} 积分。`
                   : '请调整单段时长，让总时长与目标时长一致。'}
               </span>
             </div>
@@ -2391,11 +2316,11 @@ function Workspace({ auth, onShowIntro, onShowAdmin, onLogout }) {
             <button
               className="primary-button"
               onClick={handleConfirmStoryboard}
-              disabled={isConfirming || !storyboardDurationValid || !storyboardPromptsValid}
+              disabled={isConfirming || !storyboardDurationValid || !storyboardPromptsValid || !hasEnoughCredits}
               type="button"
             >
               {isConfirming ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
-              {isConfirming ? '正在提交' : '确认提交'}
+              {isConfirming ? '正在提交' : hasEnoughCredits ? '确认提交' : '积分不足'}
             </button>
           </div>
         </section>

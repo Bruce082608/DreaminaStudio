@@ -1503,7 +1503,7 @@
 
 .model-choice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(8.4rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10.8rem, 1fr));
   gap: 0.5rem;
 }
 
@@ -1511,7 +1511,7 @@
   display: grid;
   align-content: start;
   gap: 0.42rem;
-  min-height: 6.8rem;
+  min-height: 5.85rem;
   padding: 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 0.75rem;
@@ -1537,11 +1537,9 @@
 }
 
 .model-choice-grid strong {
-  overflow: hidden;
   color: #ffffff;
   font-size: 0.86rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.28;
 }
 
 .model-choice-grid em {
@@ -2712,10 +2710,10 @@
 
 .user-row {
   display: grid;
-  grid-template-columns: minmax(17rem, 1.55fr) 0.7fr 0.7fr 0.65fr minmax(9rem, 0.9fr);
+  grid-template-columns: minmax(17rem, 1.55fr) 0.58fr 0.58fr 0.58fr 0.72fr 0.62fr minmax(9rem, 0.9fr);
   gap: 0.75rem;
   align-items: center;
-  min-width: 48rem;
+  min-width: 62rem;
   min-height: 4.25rem;
   padding: 0.75rem 0.9rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);

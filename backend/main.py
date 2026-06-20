@@ -19,8 +19,24 @@ from pydantic import BaseModel, Field
 
 try:
     from .jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
+    from . import billing
+    from .billing import (
+        BillingOverview,
+        CreditTransaction,
+        FIRST_REGISTER_BONUS_CREDITS,
+        RechargePackage,
+        RechargePayload,
+    )
 except ImportError:
     from jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
+    import billing
+    from billing import (
+        BillingOverview,
+        CreditTransaction,
+        FIRST_REGISTER_BONUS_CREDITS,
+        RechargePackage,
+        RechargePayload,
+    )
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -89,6 +105,9 @@ class UserRecord(BaseModel):
     passwordHash: str
     role: str = "user"
     status: str = "active"
+    creditBalance: int = FIRST_REGISTER_BONUS_CREDITS
+    rechargeCount: int = 0
+    lifetimeRechargeCny: float = 0
     createdAt: float
     lastLoginAt: Optional[float] = None
     loginCount: int = 0
@@ -99,6 +118,9 @@ class PublicUser(BaseModel):
     email: str
     role: str
     status: str
+    creditBalance: int = 0
+    rechargeCount: int = 0
+    lifetimeRechargeCny: float = 0
     createdAt: float
     lastLoginAt: Optional[float] = None
     loginCount: int = 0
@@ -199,6 +221,9 @@ class AgentRun(BaseModel):
     style: str
     ratio: str
     jimengModel: str = "seedance2.0fast"
+    estimatedCreditCost: int = 0
+    creditCost: int = 0
+    creditChargedAt: Optional[float] = None
     imageNames: List[str] = Field(default_factory=list)
     imageIds: List[str] = Field(default_factory=list)
     candidates: List[AgentStoryboardCandidate] = Field(default_factory=list)
@@ -247,6 +272,7 @@ uploaded_references: Dict[str, UploadedReference] = {}
 DATA_DIR = Path(__file__).resolve().parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
 SETTINGS_FILE = DATA_DIR / "agent_settings.json"
+TRANSACTIONS_FILE = DATA_DIR / "credit_transactions.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
 OUTPUTS_DIR = DATA_DIR / "outputs"
 DEFAULT_ADMIN_EMAIL = os.getenv("DREAMINA_ADMIN_EMAIL", "admin@dreamina.local").lower()
@@ -361,6 +387,63 @@ def save_users(users: Dict[str, UserRecord]) -> None:
     with USERS_FILE.open("w", encoding="utf-8") as file:
         json.dump(serialized, file, ensure_ascii=False, indent=2)
 
+def load_credit_transactions() -> List[CreditTransaction]:
+    return billing.load_credit_transactions(TRANSACTIONS_FILE)
+
+def save_credit_transactions(transactions: List[CreditTransaction]) -> None:
+    billing.save_credit_transactions(TRANSACTIONS_FILE, transactions)
+
+def append_credit_transaction(transaction: CreditTransaction) -> None:
+    billing.append_credit_transaction(TRANSACTIONS_FILE, transaction)
+
+def user_has_recharged(user: UserRecord) -> bool:
+    return billing.user_has_recharged(user, TRANSACTIONS_FILE)
+
+def create_credit_transaction(
+    user: UserRecord,
+    transaction_type: str,
+    amount: int,
+    balance_after: int,
+    description: str,
+    *,
+    package_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    price_cny: Optional[float] = None,
+    original_price_cny: Optional[float] = None,
+) -> CreditTransaction:
+    return billing.create_credit_transaction(
+        user,
+        transaction_type,
+        amount,
+        balance_after,
+        description,
+        package_id=package_id,
+        run_id=run_id,
+        price_cny=price_cny,
+        original_price_cny=original_price_cny,
+    )
+
+def get_user_transactions(user: UserRecord, limit: int = 20) -> List[CreditTransaction]:
+    return billing.get_user_transactions(user, TRANSACTIONS_FILE, limit=limit)
+
+def get_recharge_package(package_id: str) -> RechargePackage:
+    return billing.get_recharge_package(package_id)
+
+def calculate_video_credit_cost(model: str, durations: List[int]) -> int:
+    return billing.calculate_video_credit_cost(model, durations, normalize_jimeng_model)
+
+def recharge_user_credits(email: str, package_id: str) -> CreditTransaction:
+    users = load_users()
+    transaction = billing.apply_recharge(users, email, package_id, TRANSACTIONS_FILE)
+    save_users(users)
+    return transaction
+
+def charge_user_credits(email: str, amount: int, description: str, run_id: Optional[str] = None) -> CreditTransaction:
+    users = load_users()
+    transaction = billing.apply_debit(users, email, amount, description, TRANSACTIONS_FILE, run_id=run_id)
+    save_users(users)
+    return transaction
+
 def ensure_default_admin() -> None:
     users = load_users()
     if DEFAULT_ADMIN_EMAIL in users:
@@ -373,9 +456,17 @@ def ensure_default_admin() -> None:
         passwordHash=hash_password(DEFAULT_ADMIN_PASSWORD),
         role="admin",
         status="active",
+        creditBalance=FIRST_REGISTER_BONUS_CREDITS,
         createdAt=time.time(),
     )
     save_users(users)
+    append_credit_transaction(create_credit_transaction(
+        users[DEFAULT_ADMIN_EMAIL],
+        "bonus",
+        FIRST_REGISTER_BONUS_CREDITS,
+        FIRST_REGISTER_BONUS_CREDITS,
+        "首次注册赠送积分",
+    ))
     logger.info("Default admin user created: %s", DEFAULT_ADMIN_EMAIL)
 
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> UserRecord:
@@ -527,7 +618,7 @@ def build_storyboard_prompt(payload: AgentCreatePayload) -> str:
         else "没有参考图片，需要完整描述人物的稳定视觉特征。"
     )
     return f"""【基础设定】
-我将使用即梦seedance2.0模型制作一个总长{payload.duration}秒的分段长视频，请你按照要求生成详细的提示词剧本，并可适当补充细节（人物对话、人物动作等，但必须包含我说的内容）。
+我将使用即梦{payload.jimengModel}模型制作一个总长{payload.duration}秒的分段长视频，请你按照要求生成详细的提示词剧本，并可适当补充细节（人物对话、人物动作等，但必须包含我说的内容）。
 
 【画面分镜风格】
 使用{payload.style}式的分镜剧本，画幅为{payload.ratio}。{reference_rule}
@@ -1023,12 +1114,20 @@ def register_user(payload: RegisterPayload):
         passwordHash=hash_password(payload.password),
         role="user",
         status="active",
+        creditBalance=FIRST_REGISTER_BONUS_CREDITS,
         createdAt=time.time(),
         lastLoginAt=time.time(),
         loginCount=1,
     )
     users[email] = user
     save_users(users)
+    append_credit_transaction(create_credit_transaction(
+        user,
+        "bonus",
+        FIRST_REGISTER_BONUS_CREDITS,
+        user.creditBalance,
+        "首次注册赠送积分",
+    ))
 
     return AuthResponse(token=create_auth_token(email), user=user_to_public(user))
 
@@ -1054,6 +1153,16 @@ def login_user(payload: AuthPayload):
 def get_me(current_user: UserRecord = Depends(get_current_user)):
     return user_to_public(current_user)
 
+@app.get("/billing/me", response_model=BillingOverview)
+def get_billing_overview(current_user: UserRecord = Depends(get_current_user)):
+    return billing.build_billing_overview(current_user, TRANSACTIONS_FILE)
+
+@app.post("/billing/recharge", response_model=BillingOverview)
+def create_recharge(payload: RechargePayload, current_user: UserRecord = Depends(get_current_user)):
+    recharge_user_credits(current_user.email, payload.packageId)
+    refreshed_user = load_users()[current_user.email.lower()]
+    return billing.build_billing_overview(refreshed_user, TRANSACTIONS_FILE)
+
 @app.get("/admin/users", response_model=List[PublicUser])
 def get_users(_: UserRecord = Depends(require_admin)):
     users = load_users()
@@ -1066,6 +1175,7 @@ def get_users(_: UserRecord = Depends(require_admin)):
 @app.get("/admin/stats")
 def get_admin_stats(_: UserRecord = Depends(require_admin)):
     users = list(load_users().values())
+    transactions = load_credit_transactions()
     active_users = [user for user in users if user.status == "active"]
     recent_logins = [user for user in users if user.lastLoginAt and time.time() - user.lastLoginAt < 86400 * 7]
     active_agent_runs = [
@@ -1084,6 +1194,12 @@ def get_admin_stats(_: UserRecord = Depends(require_admin)):
         "agentRuns": len(agent_runs),
         "activeAgentRuns": len(active_agent_runs),
         "failedAgentRuns": len(failed_agent_runs),
+        "userCreditBalance": sum(user.creditBalance for user in users),
+        "rechargeRevenueCny": round(sum(
+            transaction.priceCny or 0
+            for transaction in transactions
+            if transaction.type == "recharge"
+        ), 2),
     }
 
 @app.get("/admin/agent/config", response_model=AgentSettingsPublic)
@@ -1185,6 +1301,7 @@ async def create_agent_run(
     if invalid_references:
         raise HTTPException(status_code=400, detail="存在无效或无权访问的参考图片")
     jimeng_model = normalize_jimeng_model(payload.jimengModel)
+    estimated_credit_cost = calculate_video_credit_cost(jimeng_model, get_scene_durations(payload))
 
     run_id = f"agent-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
     run = AgentRun(
@@ -1200,6 +1317,7 @@ async def create_agent_run(
         style=payload.style,
         ratio=payload.ratio,
         jimengModel=jimeng_model,
+        estimatedCreditCost=estimated_credit_cost,
         imageNames=payload.imageNames,
         imageIds=payload.imageIds,
         createdAt=time.time(),
@@ -1244,8 +1362,19 @@ async def confirm_agent_run(
         )
         start = end
 
+    credit_cost = calculate_video_credit_cost(run.jimengModel, [scene.duration for scene in payload.scenes])
+    charge_user_credits(
+        run.userEmail,
+        credit_cost,
+        f"视频生成扣费：{run.duration} 秒 / {len(confirmed_scenes)} 段 / {run.jimengModel}",
+        run_id=run.id,
+    )
+
     run.selectedCandidateId = payload.candidateId
     run.scenes = confirmed_scenes
+    run.estimatedCreditCost = credit_cost
+    run.creditCost = credit_cost
+    run.creditChargedAt = time.time()
     run.status = "queued"
     run.stage = "jimeng_dispatch"
     run.progress = 20
