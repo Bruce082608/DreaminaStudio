@@ -46,11 +46,52 @@ class FakeStoryboardClient:
         return FakeStoryboardResponse(self.responses.pop(0))
 
 
+class FakeSmtpClient:
+    captured = {}
+
+    def __init__(self, host, port, timeout):
+        self.captured["host"] = host
+        self.captured["port"] = port
+        self.captured["timeout"] = timeout
+        self.captured["started_tls"] = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def starttls(self):
+        self.captured["started_tls"] = True
+
+    def login(self, username, password):
+        self.captured["username"] = username
+        self.captured["password"] = password
+
+    def send_message(self, message):
+        self.captured["subject"] = message["Subject"]
+        self.captured["from"] = message["From"]
+        self.captured["to"] = message["To"]
+        self.captured["body"] = message.get_content()
+
+
 class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.database_dir = tempfile.TemporaryDirectory()
+        self.database_patcher = patch.object(
+            main.database,
+            "DATABASE_URL",
+            f"sqlite:///{Path(self.database_dir.name) / 'test.sqlite3'}",
+        )
+        self.database_patcher.start()
+        main.database.init_database()
         main.agent_runs.clear()
         main.shots_db.clear()
         main.task_queue = asyncio.Queue()
+
+    async def asyncTearDown(self):
+        self.database_patcher.stop()
+        self.database_dir.cleanup()
 
     async def test_mock_agent_flow_returns_video_result(self):
         run = main.AgentRun(
@@ -158,10 +199,13 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(candidate.scenes), 3)
         self.assertIn("「你好」", candidate.scenes[0].prompt)
 
-    def test_load_users_accepts_utf8_bom(self):
+    def test_json_user_migration_accepts_utf8_bom(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             users_file = data_dir / "users.json"
+            transactions_file = data_dir / "credit_transactions.json"
+            codes_file = data_dir / "verification_codes.json"
+            database_file = data_dir / "migrated.sqlite3"
             user = main.UserRecord(
                 id="user-bom",
                 name="编码测试",
@@ -170,14 +214,18 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
                 createdAt=main.time.time(),
             )
             users_file.write_text(
-                json.dumps({user.email: user.model_dump()}, ensure_ascii=False),
+                json.dumps({user.email: main.dump_model(user)}, ensure_ascii=False),
                 encoding="utf-8-sig",
             )
 
             with (
                 patch.object(main, "DATA_DIR", data_dir),
                 patch.object(main, "USERS_FILE", users_file),
+                patch.object(main, "TRANSACTIONS_FILE", transactions_file),
+                patch.object(main, "VERIFICATION_CODES_FILE", codes_file),
+                patch.object(main.database, "DATABASE_URL", f"sqlite:///{database_file}"),
             ):
+                main.database.migrate_json_files(users_file, transactions_file, codes_file)
                 loaded_users = main.load_users()
 
             self.assertEqual(loaded_users[user.email].name, user.name)
@@ -232,6 +280,173 @@ Dreamina CLI
                 self.assertEqual(debit.amount, -60)
                 self.assertEqual(charged_user.creditBalance, 5)
                 self.assertEqual(len(main.load_credit_transactions()), 2)
+
+    def test_recharge_request_requires_admin_approval(self):
+        user = main.UserRecord(
+            id="user-payment",
+            name="付款用户",
+            email="payment@example.com",
+            passwordHash="not-used",
+            creditBalance=15,
+            createdAt=main.time.time(),
+        )
+        admin = main.UserRecord(
+            id="user-admin",
+            name="管理员",
+            email="admin@example.com",
+            passwordHash="not-used",
+            role="admin",
+            creditBalance=15,
+            createdAt=main.time.time(),
+        )
+        main.save_users({user.email: user, admin.email: admin})
+
+        recharge_request = main.create_user_recharge_request(user, "starter_100")
+        unchanged_user = main.load_users()[user.email]
+
+        self.assertEqual(recharge_request.status, "pending")
+        self.assertEqual(recharge_request.credits, 100)
+        self.assertEqual(unchanged_user.creditBalance, 15)
+        self.assertEqual(len(main.load_admin_recharge_requests(status="pending")), 1)
+
+        with self.assertRaises(main.HTTPException):
+            main.approve_admin_recharge_request(
+                recharge_request.id,
+                main.RechargeApprovalPayload(),
+                admin,
+            )
+
+        approval = main.approve_admin_recharge_request(
+            recharge_request.id,
+            main.RechargeApprovalPayload(credits=100),
+            admin,
+        )
+        approved_request = approval["request"]
+        transaction = approval["transaction"]
+        approved_user = main.load_users()[user.email]
+
+        self.assertEqual(approved_request.status, "approved")
+        self.assertEqual(transaction.amount, 100)
+        self.assertEqual(approved_user.creditBalance, 115)
+        self.assertEqual(approved_user.rechargeCount, 1)
+        self.assertEqual(len(main.load_credit_transactions()), 1)
+
+        cancel_request = main.create_user_recharge_request(approved_user, "creator_500")
+        canceled_request = main.cancel_my_recharge_request(cancel_request.id, approved_user)
+        self.assertEqual(canceled_request.status, "canceled")
+        self.assertEqual(main.load_users()[user.email].creditBalance, 115)
+
+    def test_email_registration_login_and_profile_updates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            users_file = data_dir / "users.json"
+            transactions_file = data_dir / "credit_transactions.json"
+            codes_file = data_dir / "verification_codes.json"
+
+            with (
+                patch.object(main, "DATA_DIR", data_dir),
+                patch.object(main, "USERS_FILE", users_file),
+                patch.object(main, "TRANSACTIONS_FILE", transactions_file),
+                patch.object(main, "VERIFICATION_CODES_FILE", codes_file),
+                patch.object(main, "VERIFICATION_CODE_DEV_MODE", True),
+                patch.object(main, "SMTP_HOST", None),
+            ):
+                code_response = main.request_verification_code(main.VerificationCodePayload(
+                    channel="email",
+                    identifier="new-user@example.com",
+                ))
+                registered = main.register_user(main.RegisterPayload(
+                    name="新用户",
+                    channel="email",
+                    identifier="new-user@example.com",
+                    code=code_response.devCode,
+                    password="Secret123",
+                ))
+
+                self.assertEqual(registered.user.email, "new-user@example.com")
+                self.assertEqual(registered.user.creditBalance, 15)
+                self.assertIn("new-user@example.com", main.load_users())
+
+                logged_in = main.login_user(main.AuthPayload(
+                    identifier="new-user@example.com",
+                    password="Secret123",
+                ))
+                self.assertEqual(logged_in.user.loginCount, 2)
+
+                updated_user = main.update_profile(
+                    main.ProfileUpdatePayload(name="新用户名"),
+                    current_user=main.load_users()["new-user@example.com"],
+                )
+                self.assertEqual(updated_user.name, "新用户名")
+
+                main.change_password(
+                    main.PasswordChangePayload(
+                        currentPassword="Secret123",
+                        newPassword="NewSecret123",
+                    ),
+                    current_user=main.load_users()["new-user@example.com"],
+                )
+
+                with self.assertRaises(main.HTTPException) as old_password_error:
+                    main.login_user(main.AuthPayload(
+                        identifier="new-user@example.com",
+                        password="Secret123",
+                    ))
+                self.assertEqual(old_password_error.exception.status_code, 401)
+
+                next_login = main.login_user(main.AuthPayload(
+                    identifier="new-user@example.com",
+                    password="NewSecret123",
+                ))
+                self.assertEqual(next_login.user.name, "新用户名")
+
+    def test_email_sender_uses_configured_smtp_ssl(self):
+        FakeSmtpClient.captured = {}
+
+        with (
+            patch.object(main, "VERIFICATION_CODE_DEV_MODE", False),
+            patch.object(main, "SMTP_HOST", "smtp.qq.com"),
+            patch.object(main, "SMTP_PORT", 465),
+            patch.object(main, "SMTP_USERNAME", "873831183@qq.com"),
+            patch.object(main, "SMTP_PASSWORD", "qq-mail-auth-code"),
+            patch.object(main, "SMTP_FROM", "873831183@qq.com"),
+            patch.object(main, "SMTP_USE_SSL", True),
+            patch.object(main, "SMTP_USE_TLS", False),
+            patch.object(main.smtplib, "SMTP_SSL", FakeSmtpClient),
+        ):
+            delivery = main.send_email_code("new-user@example.com", "123456")
+
+        self.assertEqual(delivery, "email")
+        self.assertEqual(FakeSmtpClient.captured["host"], "smtp.qq.com")
+        self.assertEqual(FakeSmtpClient.captured["port"], 465)
+        self.assertEqual(FakeSmtpClient.captured["username"], "873831183@qq.com")
+        self.assertEqual(FakeSmtpClient.captured["password"], "qq-mail-auth-code")
+        self.assertEqual(FakeSmtpClient.captured["to"], "new-user@example.com")
+        self.assertIn("123456", FakeSmtpClient.captured["body"])
+        self.assertFalse(FakeSmtpClient.captured["started_tls"])
+
+    def test_phone_like_registration_identifier_is_rejected(self):
+        with self.assertRaises(main.HTTPException) as request_error:
+            main.request_verification_code(main.VerificationCodePayload(
+                identifier="15500000001",
+            ))
+
+        self.assertEqual(request_error.exception.status_code, 400)
+        self.assertEqual(main.load_verification_codes(), {})
+
+    def test_request_code_does_not_persist_when_delivery_fails(self):
+        with patch.object(
+            main,
+            "send_email_code",
+            side_effect=main.HTTPException(status_code=502, detail="发送失败"),
+        ):
+            with self.assertRaises(main.HTTPException):
+                main.request_verification_code(main.VerificationCodePayload(
+                    channel="email",
+                    identifier="fail@example.com",
+                ))
+
+        self.assertEqual(main.load_verification_codes(), {})
 
 
 if __name__ == "__main__":

@@ -7,9 +7,11 @@ import logging
 import os
 import random
 import secrets
+import smtplib
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from email.message import EmailMessage
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
@@ -19,23 +21,28 @@ from pydantic import BaseModel, Field
 
 try:
     from .jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
-    from . import billing
+    from . import billing, database
     from .billing import (
         BillingOverview,
         CreditTransaction,
         FIRST_REGISTER_BONUS_CREDITS,
+        RechargeApprovalPayload,
         RechargePackage,
         RechargePayload,
+        RechargeRequest,
     )
 except ImportError:
     from jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
     import billing
+    import database
     from billing import (
         BillingOverview,
         CreditTransaction,
         FIRST_REGISTER_BONUS_CREDITS,
+        RechargeApprovalPayload,
         RechargePackage,
         RechargePayload,
+        RechargeRequest,
     )
 
 # Setup logging
@@ -101,7 +108,8 @@ class CompileParams(BaseModel):
 class UserRecord(BaseModel):
     id: str
     name: str
-    email: str
+    email: str = ""
+    phone: Optional[str] = None
     passwordHash: str
     role: str = "user"
     status: str = "active"
@@ -115,7 +123,8 @@ class UserRecord(BaseModel):
 class PublicUser(BaseModel):
     id: str
     name: str
-    email: str
+    email: str = ""
+    phone: Optional[str] = None
     role: str
     status: str
     creditBalance: int = 0
@@ -126,11 +135,33 @@ class PublicUser(BaseModel):
     loginCount: int = 0
 
 class AuthPayload(BaseModel):
-    email: str
+    identifier: Optional[str] = None
+    email: Optional[str] = None
     password: str
 
 class RegisterPayload(AuthPayload):
     name: str
+    channel: Optional[Literal["email"]] = "email"
+    code: Optional[str] = None
+
+class VerificationCodePayload(BaseModel):
+    channel: Literal["email"] = "email"
+    identifier: str
+    purpose: Literal["register"] = "register"
+
+class VerificationCodeResponse(BaseModel):
+    channel: str
+    identifier: str
+    expiresIn: int
+    delivery: str
+    devCode: Optional[str] = None
+
+class ProfileUpdatePayload(BaseModel):
+    name: str = Field(min_length=2, max_length=40)
+
+class PasswordChangePayload(BaseModel):
+    currentPassword: str
+    newPassword: str = Field(min_length=8, max_length=128)
 
 class AuthResponse(BaseModel):
     token: str
@@ -175,7 +206,7 @@ class AgentCreatePayload(BaseModel):
     ratio: str = "16:9"
     jimengModel: str = "seedance2.0fast"
     imageNames: List[str] = Field(default_factory=list)
-    imageIds: List[str] = Field(default_factory=list, max_length=9)
+    imageIds: List[str] = Field(default_factory=list, max_items=9)
 
 class AgentRunScene(BaseModel):
     id: str
@@ -202,7 +233,7 @@ class AgentSceneEdit(BaseModel):
 
 class AgentConfirmPayload(BaseModel):
     candidateId: str
-    scenes: List[AgentSceneEdit] = Field(min_length=1, max_length=150)
+    scenes: List[AgentSceneEdit] = Field(min_items=1, max_items=150)
 
 class AgentUploadResponse(BaseModel):
     id: str
@@ -269,15 +300,34 @@ task_queue: asyncio.Queue = asyncio.Queue()
 active_workers = []
 agent_runs: Dict[str, AgentRun] = {}
 uploaded_references: Dict[str, UploadedReference] = {}
+
+def env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
 SETTINGS_FILE = DATA_DIR / "agent_settings.json"
 TRANSACTIONS_FILE = DATA_DIR / "credit_transactions.json"
+VERIFICATION_CODES_FILE = DATA_DIR / "verification_codes.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
 OUTPUTS_DIR = DATA_DIR / "outputs"
+ENVIRONMENT = os.getenv("ENV", "development").lower()
 DEFAULT_ADMIN_EMAIL = os.getenv("DREAMINA_ADMIN_EMAIL", "admin@dreamina.local").lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("DREAMINA_ADMIN_PASSWORD", "Dreamina@2026")
 AUTH_SECRET = os.getenv("DREAMINA_AUTH_SECRET", "dreamina-studio-local-dev-secret")
+VERIFICATION_CODE_TTL_SECONDS = int(os.getenv("DREAMINA_VERIFICATION_CODE_TTL_SECONDS", "600"))
+VERIFICATION_CODE_RESEND_COOLDOWN_SECONDS = int(os.getenv("DREAMINA_VERIFICATION_RESEND_COOLDOWN_SECONDS", "60"))
+VERIFICATION_CODE_DEV_MODE = env_flag(
+    "DREAMINA_VERIFICATION_DEV_MODE",
+    "false" if ENVIRONMENT == "production" else "true",
+)
+SMTP_HOST = os.getenv("DREAMINA_SMTP_HOST", "smtp.qq.com")
+SMTP_PORT = int(os.getenv("DREAMINA_SMTP_PORT", "465"))
+SMTP_USERNAME = os.getenv("DREAMINA_SMTP_USERNAME", "873831183@qq.com")
+SMTP_PASSWORD = os.getenv("DREAMINA_SMTP_PASSWORD")
+SMTP_FROM = os.getenv("DREAMINA_SMTP_FROM", SMTP_USERNAME or "no-reply@dreamina.local")
+SMTP_USE_TLS = env_flag("DREAMINA_SMTP_TLS", "false")
+SMTP_USE_SSL = env_flag("DREAMINA_SMTP_SSL", "true")
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
@@ -341,9 +391,9 @@ def decode_base64url(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode(f"{value}{padding}")
 
-def create_auth_token(email: str) -> str:
+def create_auth_token(subject: str) -> str:
     payload = {
-        "email": email.lower(),
+        "sub": subject,
         "iat": time.time(),
         "nonce": secrets.token_hex(8),
     }
@@ -364,28 +414,153 @@ def parse_auth_token(token: str) -> str:
             raise ValueError("Invalid signature")
 
         payload = json.loads(decode_base64url(encoded_payload).decode("utf-8"))
-        return str(payload["email"]).lower()
+        return str(payload.get("sub") or payload["email"]).lower()
     except (KeyError, ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=401, detail="Invalid or expired session") from None
 
+def dump_model(model: BaseModel, **kwargs):
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
+
 def user_to_public(user: UserRecord) -> PublicUser:
-    return PublicUser(**user.model_dump(exclude={"passwordHash"}))
+    return PublicUser(**dump_model(user, exclude={"passwordHash"}))
+
+def get_user_contact(user: UserRecord) -> str:
+    return user.email or user.phone or user.id
+
+def get_user_account_key(user: UserRecord) -> str:
+    if user.email:
+        return user.email.lower()
+    if user.phone:
+        return f"phone:{normalize_phone(user.phone)}"
+    return user.id.lower()
+
+def normalize_email(email: str) -> str:
+    value = (email or "").strip().lower()
+    if "@" not in value or "." not in value:
+        raise HTTPException(status_code=400, detail="请输入有效邮箱")
+    return value
+
+def normalize_phone(phone: str) -> str:
+    digits = "".join(char for char in (phone or "").strip() if char.isdigit())
+    if len(digits) < 8 or len(digits) > 15:
+        raise HTTPException(status_code=400, detail="请输入有效手机号")
+    return digits
+
+def normalize_identifier(channel: str, identifier: str) -> str:
+    if channel == "email":
+        return normalize_email(identifier)
+    if channel == "phone":
+        return normalize_phone(identifier)
+    raise HTTPException(status_code=400, detail="仅支持邮箱注册")
+
+def guess_auth_channel(identifier: str) -> str:
+    value = (identifier or "").strip()
+    return "email" if "@" in value else "phone"
+
+def get_user_storage_key(channel: str, identifier: str) -> str:
+    normalized = normalize_identifier(channel, identifier)
+    return normalized if channel == "email" else f"phone:{normalized}"
 
 def load_users() -> Dict[str, UserRecord]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not USERS_FILE.exists():
-        return {}
-
-    with USERS_FILE.open("r", encoding="utf-8-sig") as file:
-        raw_users = json.load(file)
-
-    return {email.lower(): UserRecord(**data) for email, data in raw_users.items()}
+    raw_users = database.load_users()
+    return {storage_key.lower(): UserRecord(**data) for storage_key, data in raw_users.items()}
 
 def save_users(users: Dict[str, UserRecord]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    serialized = {email: jsonable_encoder(user) for email, user in users.items()}
-    with USERS_FILE.open("w", encoding="utf-8") as file:
-        json.dump(serialized, file, ensure_ascii=False, indent=2)
+    database.save_users(users)
+
+def find_user_by_identifier(users: Dict[str, UserRecord], identifier: str) -> tuple[Optional[str], Optional[UserRecord]]:
+    raw_identifier = (identifier or "").strip()
+    if not raw_identifier:
+        return None, None
+
+    direct_key = raw_identifier.lower()
+    if direct_key in users:
+        return direct_key, users[direct_key]
+
+    channel = guess_auth_channel(raw_identifier)
+    try:
+        key = get_user_storage_key(channel, raw_identifier)
+    except HTTPException:
+        return None, None
+    if key in users:
+        return key, users[key]
+
+    normalized = normalize_identifier(channel, raw_identifier)
+    for user_key, user in users.items():
+        if channel == "email" and user.email.lower() == normalized:
+            return user_key, user
+        if channel == "phone" and user.phone and normalize_phone(user.phone) == normalized:
+            return user_key, user
+    return None, None
+
+def code_digest(channel: str, identifier: str, purpose: str, code: str) -> str:
+    message = f"{channel}:{identifier}:{purpose}:{code}".encode("utf-8")
+    return hmac.new(AUTH_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+def verification_key(channel: str, identifier: str, purpose: str) -> str:
+    return f"{channel}:{identifier}:{purpose}"
+
+def load_verification_codes() -> Dict[str, Dict[str, Any]]:
+    return database.load_verification_codes()
+
+def save_verification_codes(codes: Dict[str, Dict[str, Any]]) -> None:
+    database.save_verification_codes(codes)
+
+def send_email_code(email: str, code: str) -> str:
+    if not SMTP_HOST:
+        if VERIFICATION_CODE_DEV_MODE:
+            logger.info("Dev verification code for %s: %s", email, code)
+            return "dev"
+        raise HTTPException(status_code=503, detail="邮件验证码服务尚未配置")
+    if SMTP_USERNAME and not SMTP_PASSWORD:
+        if VERIFICATION_CODE_DEV_MODE:
+            logger.info("Dev verification code for %s: %s", email, code)
+            return "dev"
+        raise HTTPException(status_code=503, detail="邮件验证码 SMTP 授权码未配置")
+
+    message = EmailMessage()
+    message["Subject"] = "Dreamina Studio 注册验证码"
+    message["From"] = SMTP_FROM
+    message["To"] = email
+    message.set_content(f"你的 Dreamina Studio 注册验证码是：{code}。验证码 {VERIFICATION_CODE_TTL_SECONDS // 60} 分钟内有效。")
+
+    smtp_class = smtplib.SMTP_SSL if SMTP_USE_SSL else smtplib.SMTP
+    try:
+        with smtp_class(SMTP_HOST, SMTP_PORT, timeout=12) as smtp:
+            if SMTP_USE_TLS and not SMTP_USE_SSL:
+                smtp.starttls()
+            if SMTP_USERNAME and SMTP_PASSWORD:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        logger.exception("Failed to send email verification code to %s", email)
+        raise HTTPException(status_code=502, detail="邮件验证码发送失败，请稍后重试") from exc
+    return "email"
+
+def verify_registration_code(channel: str, identifier: str, code: str) -> None:
+    normalized = normalize_identifier(channel, identifier)
+    codes = load_verification_codes()
+    key = verification_key(channel, normalized, "register")
+    record = codes.get(key)
+    if not record:
+        raise HTTPException(status_code=400, detail="验证码已过期，请重新获取")
+    if int(record.get("attempts", 0)) >= 5:
+        codes.pop(key, None)
+        save_verification_codes(codes)
+        raise HTTPException(status_code=400, detail="验证码尝试次数过多，请重新获取")
+
+    expected = record.get("codeHash")
+    actual = code_digest(channel, normalized, "register", (code or "").strip())
+    if not hmac.compare_digest(str(expected), actual):
+        record["attempts"] = int(record.get("attempts", 0)) + 1
+        codes[key] = record
+        save_verification_codes(codes)
+        raise HTTPException(status_code=400, detail="验证码不正确")
+
+    codes.pop(key, None)
+    save_verification_codes(codes)
 
 def load_credit_transactions() -> List[CreditTransaction]:
     return billing.load_credit_transactions(TRANSACTIONS_FILE)
@@ -432,15 +607,49 @@ def get_recharge_package(package_id: str) -> RechargePackage:
 def calculate_video_credit_cost(model: str, durations: List[int]) -> int:
     return billing.calculate_video_credit_cost(model, durations, normalize_jimeng_model)
 
-def recharge_user_credits(email: str, package_id: str) -> CreditTransaction:
+def recharge_user_credits(identifier: str, package_id: str) -> CreditTransaction:
     users = load_users()
-    transaction = billing.apply_recharge(users, email, package_id, TRANSACTIONS_FILE)
+    user_key, user = find_user_by_identifier(users, identifier)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    transaction = billing.apply_recharge(users, user_key or identifier, package_id, TRANSACTIONS_FILE)
     save_users(users)
     return transaction
 
-def charge_user_credits(email: str, amount: int, description: str, run_id: Optional[str] = None) -> CreditTransaction:
+def create_user_recharge_request(current_user: UserRecord, package_id: str) -> RechargeRequest:
+    return billing.create_recharge_request_for_user(current_user, package_id, TRANSACTIONS_FILE)
+
+def load_user_recharge_requests(current_user: UserRecord, limit: int = 20) -> List[RechargeRequest]:
+    return billing.get_user_recharge_requests(current_user, limit=limit)
+
+def load_admin_recharge_requests(status: Optional[str] = None, limit: int = 100) -> List[RechargeRequest]:
+    return billing.load_recharge_requests(status=status, limit=limit)
+
+def approve_user_recharge_request(
+    request_id: str,
+    admin_user: UserRecord,
+    *,
+    credits: Optional[int] = None,
+    admin_note: Optional[str] = None,
+) -> tuple[RechargeRequest, CreditTransaction]:
     users = load_users()
-    transaction = billing.apply_debit(users, email, amount, description, TRANSACTIONS_FILE, run_id=run_id)
+    recharge_request, transaction = billing.apply_recharge_request_approval(
+        users,
+        request_id,
+        admin_user,
+        TRANSACTIONS_FILE,
+        credits=credits,
+        admin_note=admin_note,
+    )
+    save_users(users)
+    return recharge_request, transaction
+
+def charge_user_credits(identifier: str, amount: int, description: str, run_id: Optional[str] = None) -> CreditTransaction:
+    users = load_users()
+    user_key, user = find_user_by_identifier(users, identifier)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    transaction = billing.apply_debit(users, user_key or identifier, amount, description, TRANSACTIONS_FILE, run_id=run_id)
     save_users(users)
     return transaction
 
@@ -474,9 +683,11 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Use
         raise HTTPException(status_code=401, detail="Missing authentication token")
 
     token = authorization.removeprefix("Bearer ").strip()
-    email = parse_auth_token(token)
-
-    user = load_users().get(email)
+    subject = parse_auth_token(token)
+    users = load_users()
+    user = users.get(subject)
+    if not user:
+        _, user = find_user_by_identifier(users, subject)
     if not user or user.status != "active":
         raise HTTPException(status_code=401, detail="User is not active")
 
@@ -1076,6 +1287,8 @@ async def queue_worker():
 
 @app.on_event("startup")
 async def startup_event():
+    database.init_database()
+    database.migrate_json_files(USERS_FILE, TRANSACTIONS_FILE, VERIFICATION_CODES_FILE)
     ensure_default_admin()
     # Start background task queue worker
     worker_task = asyncio.create_task(queue_worker())
@@ -1091,26 +1304,73 @@ async def shutdown_event():
 # REST API Routes
 # ==========================================
 
+@app.post("/auth/request-code", response_model=VerificationCodeResponse)
+def request_verification_code(payload: VerificationCodePayload):
+    channel = "email"
+    identifier = normalize_email(payload.identifier)
+    users = load_users()
+    storage_key = identifier
+    if storage_key in users:
+        raise HTTPException(status_code=400, detail="该账号已注册，请直接登录")
+    existing_key, _ = find_user_by_identifier(users, identifier)
+    if existing_key:
+        raise HTTPException(status_code=400, detail="该账号已注册，请直接登录")
+
+    code = f"{secrets.randbelow(900000) + 100000}"
+    codes = load_verification_codes()
+    key = verification_key(channel, identifier, payload.purpose)
+    now = time.time()
+    existing_record = codes.get(key)
+    if existing_record and VERIFICATION_CODE_RESEND_COOLDOWN_SECONDS > 0:
+        elapsed = now - float(existing_record.get("createdAt") or 0)
+        cooldown_remaining = int(VERIFICATION_CODE_RESEND_COOLDOWN_SECONDS - elapsed)
+        if cooldown_remaining > 0:
+            raise HTTPException(status_code=429, detail=f"请 {cooldown_remaining} 秒后再获取验证码")
+
+    delivery = send_email_code(identifier, code)
+    codes[key] = {
+        "channel": channel,
+        "identifier": identifier,
+        "purpose": payload.purpose,
+        "codeHash": code_digest(channel, identifier, payload.purpose, code),
+        "expiresAt": now + VERIFICATION_CODE_TTL_SECONDS,
+        "attempts": 0,
+        "createdAt": now,
+    }
+    save_verification_codes(codes)
+
+    return VerificationCodeResponse(
+        channel=channel,
+        identifier=identifier,
+        expiresIn=VERIFICATION_CODE_TTL_SECONDS,
+        delivery=delivery,
+        devCode=code if VERIFICATION_CODE_DEV_MODE else None,
+    )
+
 @app.post("/auth/register", response_model=AuthResponse)
 def register_user(payload: RegisterPayload):
-    email = payload.email.strip().lower()
     name = payload.name.strip()
+    channel = "email"
+    identifier = normalize_email(payload.identifier or payload.email or "")
 
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Name must be at least 2 characters")
-    if "@" not in email or "." not in email:
-        raise HTTPException(status_code=400, detail="Please enter a valid email")
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if not payload.code:
+        raise HTTPException(status_code=400, detail="请先输入验证码")
+    verify_registration_code(channel, identifier, payload.code)
 
     users = load_users()
-    if email in users:
-        raise HTTPException(status_code=400, detail="Email is already registered")
+    storage_key = get_user_storage_key(channel, identifier)
+    if storage_key in users or find_user_by_identifier(users, identifier)[1]:
+        raise HTTPException(status_code=400, detail="该账号已注册")
 
     user = UserRecord(
         id=f"user-{secrets.token_hex(8)}",
         name=name,
-        email=email,
+        email=identifier,
+        phone=None,
         passwordHash=hash_password(payload.password),
         role="user",
         status="active",
@@ -1119,7 +1379,7 @@ def register_user(payload: RegisterPayload):
         lastLoginAt=time.time(),
         loginCount=1,
     )
-    users[email] = user
+    users[storage_key] = user
     save_users(users)
     append_credit_transaction(create_credit_transaction(
         user,
@@ -1129,13 +1389,13 @@ def register_user(payload: RegisterPayload):
         "首次注册赠送积分",
     ))
 
-    return AuthResponse(token=create_auth_token(email), user=user_to_public(user))
+    return AuthResponse(token=create_auth_token(storage_key), user=user_to_public(user))
 
 @app.post("/auth/login", response_model=AuthResponse)
 def login_user(payload: AuthPayload):
-    email = payload.email.strip().lower()
+    identifier = (payload.identifier or payload.email or "").strip()
     users = load_users()
-    user = users.get(email)
+    user_key, user = find_user_by_identifier(users, identifier)
 
     if not user or not verify_password(payload.password, user.passwordHash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -1144,14 +1404,49 @@ def login_user(payload: AuthPayload):
 
     user.lastLoginAt = time.time()
     user.loginCount += 1
-    users[email] = user
+    users[user_key or identifier.lower()] = user
     save_users(users)
 
-    return AuthResponse(token=create_auth_token(email), user=user_to_public(user))
+    return AuthResponse(token=create_auth_token(user_key or identifier.lower()), user=user_to_public(user))
 
 @app.get("/auth/me", response_model=PublicUser)
 def get_me(current_user: UserRecord = Depends(get_current_user)):
     return user_to_public(current_user)
+
+@app.patch("/auth/me", response_model=PublicUser)
+def update_profile(payload: ProfileUpdatePayload, current_user: UserRecord = Depends(get_current_user)):
+    users = load_users()
+    user_key = get_user_account_key(current_user)
+    if user_key not in users:
+        user_key, _ = find_user_by_identifier(users, get_user_contact(current_user))
+    if not user_key or user_key not in users:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user = users[user_key]
+    user.name = payload.name.strip()
+    users[user_key] = user
+    save_users(users)
+    return user_to_public(user)
+
+@app.put("/auth/password", response_model=PublicUser)
+def change_password(payload: PasswordChangePayload, current_user: UserRecord = Depends(get_current_user)):
+    if not verify_password(payload.currentPassword, current_user.passwordHash):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    if payload.currentPassword == payload.newPassword:
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+
+    users = load_users()
+    user_key = get_user_account_key(current_user)
+    if user_key not in users:
+        user_key, _ = find_user_by_identifier(users, get_user_contact(current_user))
+    if not user_key or user_key not in users:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user = users[user_key]
+    user.passwordHash = hash_password(payload.newPassword)
+    users[user_key] = user
+    save_users(users)
+    return user_to_public(user)
 
 @app.get("/billing/me", response_model=BillingOverview)
 def get_billing_overview(current_user: UserRecord = Depends(get_current_user)):
@@ -1159,9 +1454,30 @@ def get_billing_overview(current_user: UserRecord = Depends(get_current_user)):
 
 @app.post("/billing/recharge", response_model=BillingOverview)
 def create_recharge(payload: RechargePayload, current_user: UserRecord = Depends(get_current_user)):
-    recharge_user_credits(current_user.email, payload.packageId)
-    refreshed_user = load_users()[current_user.email.lower()]
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="普通用户请使用扫码付款流程，等待管理员确认后到账")
+    user_key = get_user_account_key(current_user)
+    recharge_user_credits(user_key, payload.packageId)
+    refreshed_user = load_users().get(user_key)
+    if not refreshed_user:
+        _, refreshed_user = find_user_by_identifier(load_users(), get_user_contact(current_user))
+    if not refreshed_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
     return billing.build_billing_overview(refreshed_user, TRANSACTIONS_FILE)
+
+@app.post("/billing/recharge-requests", response_model=RechargeRequest)
+def create_recharge_request(payload: RechargePayload, current_user: UserRecord = Depends(get_current_user)):
+    if current_user.role == "admin":
+        raise HTTPException(status_code=400, detail="管理员账号充值会直接到账，请使用管理员直充流程")
+    return create_user_recharge_request(current_user, payload.packageId)
+
+@app.get("/billing/recharge-requests/me", response_model=List[RechargeRequest])
+def get_my_recharge_requests(current_user: UserRecord = Depends(get_current_user)):
+    return load_user_recharge_requests(current_user, limit=30)
+
+@app.post("/billing/recharge-requests/{request_id}/cancel", response_model=RechargeRequest)
+def cancel_my_recharge_request(request_id: str, current_user: UserRecord = Depends(get_current_user)):
+    return billing.cancel_recharge_request(request_id, current_user)
 
 @app.get("/admin/users", response_model=List[PublicUser])
 def get_users(_: UserRecord = Depends(require_admin)):
@@ -1172,10 +1488,57 @@ def get_users(_: UserRecord = Depends(require_admin)):
         reverse=True,
     )
 
+@app.get("/admin/recharge-requests", response_model=List[RechargeRequest])
+def get_admin_recharge_requests(
+    status: Optional[str] = None,
+    limit: int = 100,
+    _: UserRecord = Depends(require_admin),
+):
+    normalized_status = status.strip().lower() if status else None
+    if normalized_status and normalized_status not in {"pending", "approved", "rejected", "canceled"}:
+        raise HTTPException(status_code=400, detail="不支持的充值申请状态")
+    return load_admin_recharge_requests(status=normalized_status, limit=limit)
+
+@app.post("/admin/recharge-requests/{request_id}/approve")
+def approve_admin_recharge_request(
+    request_id: str,
+    payload: RechargeApprovalPayload,
+    admin_user: UserRecord = Depends(require_admin),
+):
+    if payload.credits is None:
+        raise HTTPException(status_code=400, detail="请先选择要入账的积分档位")
+    recharge_request, transaction = approve_user_recharge_request(
+        request_id,
+        admin_user,
+        credits=payload.credits,
+        admin_note=payload.adminNote,
+    )
+    refreshed_user = load_users().get(transaction.userEmail.lower())
+    if not refreshed_user:
+        _, refreshed_user = find_user_by_identifier(load_users(), transaction.userEmail)
+    return {
+        "request": recharge_request,
+        "transaction": transaction,
+        "billing": billing.build_billing_overview(refreshed_user, TRANSACTIONS_FILE) if refreshed_user else None,
+    }
+
+@app.post("/admin/recharge-requests/{request_id}/reject", response_model=RechargeRequest)
+def reject_admin_recharge_request(
+    request_id: str,
+    payload: RechargeApprovalPayload,
+    admin_user: UserRecord = Depends(require_admin),
+):
+    return billing.reject_recharge_request(
+        request_id,
+        admin_user,
+        admin_note=payload.adminNote,
+    )
+
 @app.get("/admin/stats")
 def get_admin_stats(_: UserRecord = Depends(require_admin)):
     users = list(load_users().values())
     transactions = load_credit_transactions()
+    pending_recharge_requests = load_admin_recharge_requests(status="pending", limit=500)
     active_users = [user for user in users if user.status == "active"]
     recent_logins = [user for user in users if user.lastLoginAt and time.time() - user.lastLoginAt < 86400 * 7]
     active_agent_runs = [
@@ -1195,6 +1558,7 @@ def get_admin_stats(_: UserRecord = Depends(require_admin)):
         "activeAgentRuns": len(active_agent_runs),
         "failedAgentRuns": len(failed_agent_runs),
         "userCreditBalance": sum(user.creditBalance for user in users),
+        "pendingRechargeRequests": len(pending_recharge_requests),
         "rechargeRevenueCny": round(sum(
             transaction.priceCny or 0
             for transaction in transactions
@@ -1307,7 +1671,7 @@ async def create_agent_run(
     run = AgentRun(
         id=run_id,
         userId=current_user.id,
-        userEmail=current_user.email,
+        userEmail=get_user_contact(current_user),
         status="queued",
         stage="queued",
         progress=2,
@@ -1403,6 +1767,7 @@ def health_check():
         "queue_size": task_queue.qsize(),
         "timestamp": time.time(),
         "jimeng_cli": cli_public_status(),
+        "database": database.public_status(),
     }
 
 # --- Cookie Pool CRUD ---

@@ -65,6 +65,12 @@
   background: rgba(34, 197, 94, 0.08);
 }
 
+.recharge-package-row button.selected {
+  border-color: rgba(125, 211, 252, 0.72);
+  background: rgba(56, 189, 248, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.22);
+}
+
 .recharge-package-row button:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: rgba(56, 189, 248, 0.48);
@@ -98,6 +104,10 @@
   font-weight: 850;
 }
 
+.recharge-package-row em.pending {
+  color: #fbbf24;
+}
+
 .recharge-package-row small {
   color: #9aa7b8;
   font-size: 0.74rem;
@@ -109,6 +119,49 @@
 
 .recharge-package-row b {
   color: #7dd3fc;
+}
+
+.recharge-confirm-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 3.1rem;
+  padding: 0.68rem 0.78rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.7rem;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.recharge-confirm-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recharge-confirm-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.35rem;
+  padding: 0 0.9rem;
+  border: 0;
+  border-radius: 0.62rem;
+  background: linear-gradient(135deg, #e8fbff, #67e8f9 44%, #22c55e);
+  color: #041114;
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.recharge-confirm-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
 }
 
 @media (max-width: 900px) {
@@ -124,5 +177,18 @@
 @media (max-width: 640px) {
   .recharge-package-row {
     grid-template-columns: 1fr;
+  }
+
+  .recharge-confirm-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recharge-confirm-row span {
+    white-space: normal;
+  }
+
+  .recharge-confirm-row button {
+    width: 100%;
   }
 }
