@@ -33,7 +33,8 @@ export const agentStageIndexes = {
   completed: 4,
 };
 
-export const AGENT_POLL_INTERVAL = 1200;
+export const AGENT_FAST_POLL_INTERVAL = 1200;
+export const AGENT_POLL_INTERVAL = 60000;
 
 export const initialWorkspace = {
   idea: '',

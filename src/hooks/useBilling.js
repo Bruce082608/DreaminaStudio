@@ -83,6 +83,26 @@ export default function useBilling(authToken, authUser) {
     }
   }
 
+  async function markRechargeRequestPaid(requestId) {
+    if (!authToken || !requestId) return null;
+    setBillingError('');
+
+    try {
+      const paidRequest = await apiRequest(`/billing/recharge-requests/${requestId}/mark-paid`, {
+        method: 'POST',
+        authToken,
+      });
+      setRechargeRequests((current) => {
+        const rest = current.filter((item) => item.id !== paidRequest.id);
+        return [paidRequest, ...rest].sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+      });
+      return paidRequest;
+    } catch (error) {
+      setBillingError(error.message);
+      return null;
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
@@ -119,6 +139,7 @@ export default function useBilling(authToken, authUser) {
     billingError: authToken ? billingError : '',
     cancelRechargeRequest,
     handleRecharge,
+    markRechargeRequestPaid,
     rechargeRequests: authToken ? rechargeRequests : [],
     rechargingPackageId,
     refreshBilling,

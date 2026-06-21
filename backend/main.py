@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import re
 import secrets
 import smtplib
 import time
@@ -48,6 +49,9 @@ except ImportError:
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dreamina_backend")
+
+MAX_REFERENCE_IMAGES = 9
+REFERENCE_TOKEN_PATTERN = re.compile(r"@([A-Za-z0-9_\-\u4e00-\u9fff]+)")
 
 app = FastAPI(
     title="Dreamina Studio Backend",
@@ -198,6 +202,12 @@ class AgentSettingsPublic(BaseModel):
     jimengTokenPoolConfigured: bool = False
     updatedAt: Optional[float] = None
 
+class AgentImageReference(BaseModel):
+    id: str
+    name: str = ""
+    label: str = ""
+    token: Optional[str] = None
+
 class AgentCreatePayload(BaseModel):
     idea: str
     duration: int = Field(default=180, ge=15, le=600)
@@ -206,7 +216,15 @@ class AgentCreatePayload(BaseModel):
     ratio: str = "16:9"
     jimengModel: str = "seedance2.0fast"
     imageNames: List[str] = Field(default_factory=list)
-    imageIds: List[str] = Field(default_factory=list, max_items=9)
+    imageIds: List[str] = Field(default_factory=list, max_items=MAX_REFERENCE_IMAGES)
+    imageReferences: List[AgentImageReference] = Field(default_factory=list, max_items=MAX_REFERENCE_IMAGES)
+    sceneLimit: str = ""
+    sceneImageNames: List[str] = Field(default_factory=list)
+    sceneImageIds: List[str] = Field(default_factory=list, max_items=MAX_REFERENCE_IMAGES)
+    sceneImageReferences: List[AgentImageReference] = Field(default_factory=list, max_items=MAX_REFERENCE_IMAGES)
+    blockSubtitles: bool = True
+    soundEffectOnly: bool = False
+    forceMute: bool = False
 
 class AgentRunScene(BaseModel):
     id: str
@@ -219,6 +237,9 @@ class AgentRunScene(BaseModel):
     progress: int = 0
     videoUrl: Optional[str] = None
     error: Optional[str] = None
+    creditRefundedAt: Optional[float] = None
+    refundCredit: int = 0
+    retryCount: int = 0
 
 class AgentStoryboardCandidate(BaseModel):
     id: str
@@ -257,6 +278,14 @@ class AgentRun(BaseModel):
     creditChargedAt: Optional[float] = None
     imageNames: List[str] = Field(default_factory=list)
     imageIds: List[str] = Field(default_factory=list)
+    imageReferences: List[AgentImageReference] = Field(default_factory=list)
+    sceneLimit: str = ""
+    sceneImageNames: List[str] = Field(default_factory=list)
+    sceneImageIds: List[str] = Field(default_factory=list)
+    sceneImageReferences: List[AgentImageReference] = Field(default_factory=list)
+    blockSubtitles: bool = True
+    soundEffectOnly: bool = False
+    forceMute: bool = False
     candidates: List[AgentStoryboardCandidate] = Field(default_factory=list)
     selectedCandidateId: Optional[str] = None
     scenes: List[AgentRunScene] = Field(default_factory=list)
@@ -653,6 +682,28 @@ def charge_user_credits(identifier: str, amount: int, description: str, run_id: 
     save_users(users)
     return transaction
 
+def refund_user_credits(identifier: str, amount: int, description: str, run_id: Optional[str] = None) -> CreditTransaction:
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="返还积分必须大于 0")
+    users = load_users()
+    user_key, user = find_user_by_identifier(users, identifier)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    storage_key = user_key or identifier
+    user.creditBalance += amount
+    users[storage_key.lower()] = user
+    transaction = create_credit_transaction(
+        user,
+        "refund",
+        amount,
+        user.creditBalance,
+        description,
+        run_id=run_id,
+    )
+    append_credit_transaction(transaction)
+    save_users(users)
+    return transaction
+
 def ensure_default_admin() -> None:
     users = load_users()
     if DEFAULT_ADMIN_EMAIL in users:
@@ -739,6 +790,121 @@ def agent_settings_to_public(settings: AgentSettings) -> AgentSettingsPublic:
         updatedAt=settings.updatedAt,
     )
 
+def default_reference_label(index: int) -> str:
+    return f"图片{index + 1}"
+
+def default_scene_reference_label(index: int) -> str:
+    return f"场景{index + 1}"
+
+def normalize_reference_label(value: Optional[str], fallback: str) -> str:
+    normalized = (value or "").strip().lstrip("@").strip()
+    return normalized or fallback
+
+def copy_model_with_update(model: BaseModel, updates: Dict[str, Any]):
+    if hasattr(model, "model_copy"):
+        return model.model_copy(update=updates)
+    return model.copy(update=updates)
+
+def build_payload_image_references(payload: AgentCreatePayload) -> List[AgentImageReference]:
+    return build_reference_list(
+        payload.imageIds,
+        payload.imageNames,
+        payload.imageReferences,
+        default_reference_label,
+    )
+
+def build_payload_scene_references(payload: AgentCreatePayload) -> List[AgentImageReference]:
+    return build_reference_list(
+        payload.sceneImageIds,
+        payload.sceneImageNames,
+        payload.sceneImageReferences,
+        default_scene_reference_label,
+    )
+
+def build_reference_list(
+    image_ids: List[str],
+    image_names: List[str],
+    image_references: List[AgentImageReference],
+    label_factory,
+) -> List[AgentImageReference]:
+    declared_references = {
+        reference.id: reference
+        for reference in image_references
+        if reference.id
+    }
+    references = []
+    for index, image_id in enumerate(image_ids[:MAX_REFERENCE_IMAGES]):
+        uploaded = uploaded_references.get(image_id)
+        declared = declared_references.get(image_id)
+        fallback_name = image_names[index] if index < len(image_names) else ""
+        name = (declared.name if declared and declared.name else "") or (uploaded.name if uploaded else "") or fallback_name
+        label = normalize_reference_label(
+            declared.label if declared else None,
+            label_factory(index),
+        )
+        references.append(
+            AgentImageReference(
+                id=image_id,
+                name=name or label,
+                label=label,
+                token=f"@{label}",
+            )
+        )
+    return references
+
+def get_payload_reference_descriptions(payload: AgentCreatePayload) -> List[str]:
+    references = payload.imageReferences
+    if not references and payload.imageIds:
+        references = [
+            AgentImageReference(
+                id=image_id,
+                name=payload.imageNames[index] if index < len(payload.imageNames) else default_reference_label(index),
+                label=default_reference_label(index),
+                token=f"@{default_reference_label(index)}",
+            )
+            for index, image_id in enumerate(payload.imageIds)
+        ]
+    return [
+        f"- @{reference.label}: {reference.name or reference.label}"
+        for reference in references
+    ]
+
+def get_payload_scene_reference_descriptions(payload: AgentCreatePayload) -> List[str]:
+    references = payload.sceneImageReferences
+    if not references and payload.sceneImageIds:
+        references = [
+            AgentImageReference(
+                id=image_id,
+                name=payload.sceneImageNames[index] if index < len(payload.sceneImageNames) else default_scene_reference_label(index),
+                label=default_scene_reference_label(index),
+                token=f"@{default_scene_reference_label(index)}",
+            )
+            for index, image_id in enumerate(payload.sceneImageIds)
+        ]
+    return [
+        f"- @{reference.label}: {reference.name or reference.label}"
+        for reference in references
+    ]
+
+def build_prompt_constraints(
+    *,
+    scene_limit: str = "",
+    block_subtitles: bool = True,
+    sound_effect_only: bool = False,
+    force_mute: bool = False,
+) -> List[str]:
+    constraints = []
+    normalized_scene_limit = (scene_limit or "").strip()
+    if normalized_scene_limit:
+        constraints.append(f"场景限制：{normalized_scene_limit}")
+    if block_subtitles:
+        constraints.append("不要出现任何字幕。")
+    if force_mute:
+        constraints.append("不要有任何声音。")
+    elif sound_effect_only:
+        constraints.append("不要有任何背景音乐，只保留音效。")
+    return constraints
+
 def format_time(seconds: int) -> str:
     minutes = seconds // 60
     remaining_seconds = seconds % 60
@@ -767,12 +933,23 @@ def fallback_candidates(payload: AgentCreatePayload, run_id: str) -> List[AgentS
         "尾声与回响",
     ]
     direction = "强调叙事清晰、镜头连续、动作可执行和情绪递进"
+    reference_lines = get_payload_reference_descriptions(payload)
+    scene_reference_lines = get_payload_scene_reference_descriptions(payload)
+    reference_summary = "、".join(line.removeprefix("- ") for line in reference_lines)
+    scene_reference_summary = "、".join(line.removeprefix("- ") for line in scene_reference_lines)
+    constraints = build_prompt_constraints(
+        scene_limit=payload.sceneLimit,
+        block_subtitles=payload.blockSubtitles,
+        sound_effect_only=payload.soundEffectOnly,
+        force_mute=payload.forceMute,
+    )
+    constraint_note = " ".join(constraints)
     scenes = []
     start = 0
     for scene_index, scene_duration in enumerate(get_scene_durations(payload)):
         end = start + scene_duration
         reference_note = (
-            "使用上传参考图保持人物一致，不描述人物衣物服装。"
+            f"使用上传参考图保持人物一致，引用关系为：{reference_summary}。不描述人物衣物服装。"
             if payload.imageIds
             else "完整描述人物外观、环境和关键视觉特征。"
         )
@@ -785,6 +962,8 @@ def fallback_candidates(payload: AgentCreatePayload, run_id: str) -> List[AgentS
                 duration=scene_duration,
                 prompt=(
                     f"{payload.style}式分镜，{payload.ratio}，{direction}。{reference_note}"
+                    f"{'场景参考图：' + scene_reference_summary + '。' if scene_reference_summary else ''}"
+                    f"{constraint_note}"
                     f"本段必须独立描述画面主体、动作或对话、环境、光线、情绪和运镜。"
                     f"剧本内容：{payload.idea}"
                 ),
@@ -822,11 +1001,40 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 
 def build_storyboard_prompt(payload: AgentCreatePayload) -> str:
     scene_durations = get_scene_durations(payload)
+    reference_lines = get_payload_reference_descriptions(payload)
+    scene_reference_lines = get_payload_scene_reference_descriptions(payload)
+    constraints = build_prompt_constraints(
+        scene_limit=payload.sceneLimit,
+        block_subtitles=payload.blockSubtitles,
+        sound_effect_only=payload.soundEffectOnly,
+        force_mute=payload.forceMute,
+    )
     reference_rule = (
-        "有参考图片。不要对人物进行任何衣物、服装、配饰上的描述；"
-        "只需用‘参考图中的人物’指代，并保持人物一致。"
+        "有参考图片。用户会用 @图片1、@图片2 这类标记引用具体图片；"
+        "必须理解每个标记对应的参考图，并在需要该参考图的分镜提示词中保留相同 @ 标记。"
+        "不要混淆不同参考图；不要对参考图人物进行衣物、服装、配饰上的描述；"
+        "只需用对应 @ 标记或‘参考图中的人物’指代，并保持人物一致。"
         if payload.imageIds
         else "没有参考图片，需要完整描述人物的稳定视觉特征。"
+    )
+    reference_catalog = (
+        f"\n【参考图片引用目录】\n{chr(10).join(reference_lines)}\n"
+        "如果用户的剧本描述中出现这些 @ 标记，请把标记和对应画面关系写入相关分镜 prompt。"
+        if reference_lines
+        else ""
+    )
+    scene_catalog = (
+        f"\n【场景限制】\n{payload.sceneLimit.strip() if payload.sceneLimit.strip() else '无文字场景限制'}\n"
+        f"{chr(10).join(scene_reference_lines) if scene_reference_lines else '无场景参考图片'}\n"
+        "场景限制是每一段分镜的前提，必须写入每段 prompt。"
+        if payload.sceneLimit.strip() or scene_reference_lines
+        else ""
+    )
+    constraint_catalog = (
+        f"\n【强制生成限制】\n{chr(10).join(f'- {constraint}' for constraint in constraints)}\n"
+        "这些限制必须写入每段 prompt，且优先级高于补充创意。"
+        if constraints
+        else ""
     )
     return f"""【基础设定】
 我将使用即梦{payload.jimengModel}模型制作一个总长{payload.duration}秒的分段长视频，请你按照要求生成详细的提示词剧本，并可适当补充细节（人物对话、人物动作等，但必须包含我说的内容）。
@@ -835,6 +1043,9 @@ def build_storyboard_prompt(payload: AgentCreatePayload) -> str:
 使用{payload.style}式的分镜剧本，画幅为{payload.ratio}。{reference_rule}
 每一段分镜目标时长为{payload.segmentDuration}秒，本次各段实际时长依次为：{scene_durations}秒。
 需要考虑到视频生成模型无法看到上一段提示词，所以每一段之间应完全独立描述，重复写清人物、场景、时间、光线和必要的连续性信息。如有角色，则在剧本中跟随角色的动作或对话描述运镜。
+{reference_catalog}
+{scene_catalog}
+{constraint_catalog}
 
 【剧本描述】
 {payload.idea}
@@ -1027,7 +1238,7 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
 def backend_status_to_agent_status(status: str) -> str:
     return {
         "idle": "queued",
-        "waiting": "queued",
+        "waiting": "waiting",
         "generating": "generating",
         "completed": "completed",
         "failed": "failed",
@@ -1047,6 +1258,14 @@ async def process_agent_run(run_id: str) -> None:
         jimengModel=run.jimengModel,
         imageNames=run.imageNames,
         imageIds=run.imageIds,
+        imageReferences=run.imageReferences,
+        sceneLimit=run.sceneLimit,
+        sceneImageNames=run.sceneImageNames,
+        sceneImageIds=run.sceneImageIds,
+        sceneImageReferences=run.sceneImageReferences,
+        blockSubtitles=run.blockSubtitles,
+        soundEffectOnly=run.soundEffectOnly,
+        forceMute=run.forceMute,
     )
 
     try:
@@ -1075,13 +1294,174 @@ async def process_agent_run(run_id: str) -> None:
         agent_runs[run_id] = run
         logger.exception("Agent run %s failed: %s", run_id, exc)
 
+def get_run_reference_entries(
+    run: AgentRun,
+    *,
+    scene_references: bool = False,
+) -> List[Dict[str, Any]]:
+    image_ids = run.sceneImageIds if scene_references else run.imageIds
+    image_names = run.sceneImageNames if scene_references else run.imageNames
+    image_references = run.sceneImageReferences if scene_references else run.imageReferences
+    label_factory = default_scene_reference_label if scene_references else default_reference_label
+    declared_references = {
+        reference.id: reference
+        for reference in image_references
+        if reference.id
+    }
+    entries = []
+    for index, image_id in enumerate(image_ids[:MAX_REFERENCE_IMAGES]):
+        uploaded = uploaded_references.get(image_id)
+        if not uploaded or uploaded.userId != run.userId:
+            continue
+        declared = declared_references.get(image_id)
+        fallback_name = image_names[index] if index < len(image_names) else ""
+        label = normalize_reference_label(
+            declared.label if declared else None,
+            label_factory(index),
+        )
+        name = (declared.name if declared and declared.name else "") or uploaded.name or fallback_name or label
+        entries.append(
+            {
+                "id": image_id,
+                "name": name,
+                "label": label,
+                "token": f"@{label}",
+                "path": Path(uploaded.path),
+            }
+        )
+    return entries
+
 def get_run_reference_paths(run: AgentRun) -> List[Path]:
-    paths = []
-    for image_id in run.imageIds:
-        reference = uploaded_references.get(image_id)
-        if reference and reference.userId == run.userId:
-            paths.append(Path(reference.path))
-    return paths
+    return [entry["path"] for entry in get_run_reference_entries(run)]
+
+def get_run_scene_reference_entries(run: AgentRun) -> List[Dict[str, Any]]:
+    return get_run_reference_entries(run, scene_references=True)
+
+def select_scene_reference_entries(run: AgentRun, prompt: str) -> List[Dict[str, Any]]:
+    entries = get_run_reference_entries(run)
+    if not entries:
+        return []
+
+    lookup = {}
+    for entry in entries:
+        lookup[entry["label"].lower()] = entry
+        lookup[entry["token"].lstrip("@").lower()] = entry
+
+    selected = []
+    selected_ids = set()
+    for match in REFERENCE_TOKEN_PATTERN.finditer(prompt or ""):
+        token = normalize_reference_label(match.group(1), "").lower()
+        entry = lookup.get(token)
+        if entry and entry["id"] not in selected_ids:
+            selected.append(entry)
+            selected_ids.add(entry["id"])
+
+    return selected or entries
+
+def prepare_scene_prompt_and_references(run: AgentRun, scene: AgentRunScene) -> tuple[str, List[Path]]:
+    scene_entries = get_run_scene_reference_entries(run)
+    selected_entries = select_scene_reference_entries(run, scene.prompt)
+    available_reference_slots = max(MAX_REFERENCE_IMAGES - len(scene_entries), 0)
+    selected_entries = selected_entries[:available_reference_slots]
+    combined_entries = scene_entries + selected_entries
+    constraints = build_prompt_constraints(
+        scene_limit=run.sceneLimit,
+        block_subtitles=run.blockSubtitles,
+        sound_effect_only=run.soundEffectOnly,
+        force_mute=run.forceMute,
+    )
+    prefix_parts = []
+    if constraints:
+        prefix_parts.append("强制限制：" + " ".join(constraints))
+    if not combined_entries:
+        return f"{' '.join(prefix_parts)}{scene.prompt}" if prefix_parts else scene.prompt, []
+
+    prompt = scene.prompt
+    mapping_parts = []
+    for index, entry in enumerate(combined_entries, start=1):
+        slot = f"@image_file_{index}"
+        aliases = sorted({entry["token"], f"@{entry['label']}"}, key=len, reverse=True)
+        for alias in aliases:
+            prompt = prompt.replace(alias, slot)
+        mapping_parts.append(f"{slot}={entry['label']}（{entry['name']}）")
+
+    reference_instruction = (
+        f"参考图映射：{'、'.join(mapping_parts)}。"
+        "请严格按映射理解主体、场景或风格，保持引用关系正确。"
+    )
+    if scene_entries:
+        prefix_parts.append("场景参考图是每段画面的固定前提。")
+    prefix_parts.append(reference_instruction)
+    return f"{' '.join(prefix_parts)}{prompt}", [entry["path"] for entry in combined_entries]
+
+def get_scene_credit_cost(run: AgentRun, scene: AgentRunScene) -> int:
+    return calculate_video_credit_cost(run.jimengModel, [scene.duration])
+
+def mark_scene_refunded(run: AgentRun, scene_id: str, refund_credit: int) -> None:
+    run.scenes = [
+        copy_model_with_update(scene, {
+            "creditRefundedAt": time.time(),
+            "refundCredit": refund_credit,
+        })
+        if scene.id == scene_id and not scene.creditRefundedAt
+        else scene
+        for scene in run.scenes
+    ]
+
+def refund_failed_scene_if_needed(run: AgentRun, scene: AgentRunScene) -> None:
+    current_scene = next((item for item in run.scenes if item.id == scene.id), scene)
+    if current_scene.creditRefundedAt:
+        return
+    refund_credit = get_scene_credit_cost(run, current_scene)
+    refund_user_credits(
+        run.userEmail,
+        refund_credit,
+        f"分镜生成失败返还：{current_scene.number} / {current_scene.title}",
+        run_id=run.id,
+    )
+    mark_scene_refunded(run, scene.id, refund_credit)
+
+async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: AgentSettings) -> None:
+    shot = shots_db[scene.id]
+    shot.status = "generating"
+    shot.progress = 5
+    shot.error = None
+    run.stage = "jimeng_generating"
+    run.updatedAt = time.time()
+    sync_run_from_shots(run)
+
+    try:
+        if settings.jimengMode == "mock":
+            await simulate_video_generation(scene.id, None)
+        elif settings.jimengMode == "cli":
+            scene_prompt, scene_reference_paths = prepare_scene_prompt_and_references(run, scene)
+            result = await generate_video(
+                prompt=scene_prompt,
+                duration=scene.duration,
+                ratio=run.ratio,
+                model=run.jimengModel or settings.jimengModel,
+                region=settings.jimengRegion,
+                output_dir=OUTPUTS_DIR / run.id / scene.id,
+                reference_paths=scene_reference_paths,
+                public_root=OUTPUTS_DIR,
+                public_url_prefix="/api/outputs",
+            )
+            shot.videoUrl = result.video_url
+            shot.progress = 100
+            shot.status = "completed"
+        else:
+            raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
+    except (JimengCliError, RuntimeError) as exc:
+        shot.status = "failed"
+        shot.progress = 0
+        shot.error = str(exc)
+        refund_failed_scene_if_needed(run, scene)
+        logger.exception("Jimeng scene %s failed: %s", scene.id, exc)
+
+    if shot.status == "failed":
+        refund_failed_scene_if_needed(run, scene)
+
+    sync_run_from_shots(run)
 
 async def process_confirmed_run(run_id: str) -> None:
     run = agent_runs.get(run_id)
@@ -1090,7 +1470,6 @@ async def process_confirmed_run(run_id: str) -> None:
 
     try:
         settings = load_agent_settings()
-        reference_paths = get_run_reference_paths(run)
         run.status = "generating"
         run.stage = "jimeng_dispatch"
         run.progress = 20
@@ -1110,44 +1489,7 @@ async def process_confirmed_run(run_id: str) -> None:
         agent_runs[run_id] = run
 
         for scene in run.scenes:
-            shot = shots_db[scene.id]
-            shot.status = "generating"
-            shot.progress = 5
-            run.stage = "jimeng_generating"
-            run.updatedAt = time.time()
-            sync_run_from_shots(run)
-
-            try:
-                if settings.jimengMode == "mock":
-                    await simulate_video_generation(scene.id, None)
-                elif settings.jimengMode == "cli":
-                    reference_instruction = ""
-                    if reference_paths:
-                        slots = "、".join(f"@image_file_{index}" for index in range(1, len(reference_paths) + 1))
-                        reference_instruction = f"使用参考图片 {slots} 保持角色与场景一致。"
-                    result = await generate_video(
-                        prompt=f"{reference_instruction}{scene.prompt}",
-                        duration=scene.duration,
-                        ratio=run.ratio,
-                        model=run.jimengModel or settings.jimengModel,
-                        region=settings.jimengRegion,
-                        output_dir=OUTPUTS_DIR / run.id / scene.id,
-                        reference_paths=reference_paths,
-                        public_root=OUTPUTS_DIR,
-                        public_url_prefix="/api/outputs",
-                    )
-                    shot.videoUrl = result.video_url
-                    shot.progress = 100
-                    shot.status = "completed"
-                else:
-                    raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
-            except (JimengCliError, RuntimeError) as exc:
-                shot.status = "failed"
-                shot.progress = 0
-                shot.error = str(exc)
-                logger.exception("Jimeng scene %s failed: %s", scene.id, exc)
-
-            sync_run_from_shots(run)
+            await generate_single_scene(run, scene, settings)
 
         sync_run_from_shots(run)
         logger.info("Agent run %s finished sequential Jimeng generation.", run_id)
@@ -1158,6 +1500,45 @@ async def process_confirmed_run(run_id: str) -> None:
         run.updatedAt = time.time()
         agent_runs[run_id] = run
         logger.exception("Confirmed Agent run %s failed: %s", run_id, exc)
+
+async def process_scene_retry(run_id: str, scene_id: str) -> None:
+    run = agent_runs.get(run_id)
+    if not run:
+        return
+
+    scene = next((item for item in run.scenes if item.id == scene_id), None)
+    if not scene:
+        return
+
+    try:
+        settings = load_agent_settings()
+        run.status = "generating"
+        run.stage = "jimeng_generating"
+        run.error = None
+        run.updatedAt = time.time()
+        shots_db[scene.id] = Shot(
+            id=scene.id,
+            prompt=scene.prompt,
+            duration=scene.duration,
+            engine="jimeng",
+            status="waiting",
+            progress=0,
+            caption=f"{scene.title} / {run.ratio}",
+        )
+        agent_runs[run_id] = run
+        await generate_single_scene(run, scene, settings)
+        sync_run_from_shots(run)
+        logger.info("Agent run %s retried scene %s.", run_id, scene_id)
+    except Exception as exc:
+        shot = shots_db.get(scene_id)
+        if shot:
+            shot.status = "failed"
+            shot.progress = 0
+            shot.error = str(exc)
+        refund_failed_scene_if_needed(run, scene)
+        run.updatedAt = time.time()
+        agent_runs[run_id] = run
+        logger.exception("Scene retry %s/%s failed: %s", run_id, scene_id, exc)
 
 # ==========================================
 # Background Generation Worker
@@ -1479,6 +1860,10 @@ def get_my_recharge_requests(current_user: UserRecord = Depends(get_current_user
 def cancel_my_recharge_request(request_id: str, current_user: UserRecord = Depends(get_current_user)):
     return billing.cancel_recharge_request(request_id, current_user)
 
+@app.post("/billing/recharge-requests/{request_id}/mark-paid", response_model=RechargeRequest)
+def mark_my_recharge_request_paid(request_id: str, current_user: UserRecord = Depends(get_current_user)):
+    return billing.mark_recharge_request_paid(request_id, current_user)
+
 @app.get("/admin/users", response_model=List[PublicUser])
 def get_users(_: UserRecord = Depends(require_admin)):
     users = load_users()
@@ -1495,7 +1880,7 @@ def get_admin_recharge_requests(
     _: UserRecord = Depends(require_admin),
 ):
     normalized_status = status.strip().lower() if status else None
-    if normalized_status and normalized_status not in {"pending", "approved", "rejected", "canceled"}:
+    if normalized_status and normalized_status not in {"pending", "processing", "approved", "rejected", "canceled"}:
         raise HTTPException(status_code=400, detail="不支持的充值申请状态")
     return load_admin_recharge_requests(status=normalized_status, limit=limit)
 
@@ -1538,7 +1923,10 @@ def reject_admin_recharge_request(
 def get_admin_stats(_: UserRecord = Depends(require_admin)):
     users = list(load_users().values())
     transactions = load_credit_transactions()
-    pending_recharge_requests = load_admin_recharge_requests(status="pending", limit=500)
+    pending_recharge_requests = [
+        request for request in load_admin_recharge_requests(limit=500)
+        if request.status in {"pending", "processing"}
+    ]
     active_users = [user for user in users if user.status == "active"]
     recent_logins = [user for user in users if user.lastLoginAt and time.time() - user.lastLoginAt < 86400 * 7]
     active_agent_runs = [
@@ -1657,13 +2045,21 @@ async def create_agent_run(
 ):
     if not payload.idea.strip():
         raise HTTPException(status_code=400, detail="请先填写视频创意")
+    if payload.duration % payload.segmentDuration != 0:
+        raise HTTPException(status_code=400, detail="目标时长必须能被单段时长整除")
+    if len(payload.imageIds) > MAX_REFERENCE_IMAGES:
+        raise HTTPException(status_code=400, detail=f"最多同时使用 {MAX_REFERENCE_IMAGES} 张参考图片")
+    if len(payload.sceneImageIds) > MAX_REFERENCE_IMAGES:
+        raise HTTPException(status_code=400, detail=f"最多同时使用 {MAX_REFERENCE_IMAGES} 张场景图片")
     invalid_references = [
-        image_id for image_id in payload.imageIds
+        image_id for image_id in [*payload.imageIds, *payload.sceneImageIds]
         if image_id not in uploaded_references
         or uploaded_references[image_id].userId != current_user.id
     ]
     if invalid_references:
         raise HTTPException(status_code=400, detail="存在无效或无权访问的参考图片")
+    image_references = build_payload_image_references(payload)
+    scene_image_references = build_payload_scene_references(payload)
     jimeng_model = normalize_jimeng_model(payload.jimengModel)
     estimated_credit_cost = calculate_video_credit_cost(jimeng_model, get_scene_durations(payload))
 
@@ -1684,6 +2080,14 @@ async def create_agent_run(
         estimatedCreditCost=estimated_credit_cost,
         imageNames=payload.imageNames,
         imageIds=payload.imageIds,
+        imageReferences=image_references,
+        sceneLimit=payload.sceneLimit.strip(),
+        sceneImageNames=payload.sceneImageNames,
+        sceneImageIds=payload.sceneImageIds,
+        sceneImageReferences=scene_image_references,
+        blockSubtitles=payload.blockSubtitles,
+        soundEffectOnly=payload.soundEffectOnly,
+        forceMute=payload.forceMute,
         createdAt=time.time(),
         updatedAt=time.time(),
     )
@@ -1746,6 +2150,67 @@ async def confirm_agent_run(
     agent_runs[run.id] = run
     background_tasks.add_task(process_confirmed_run, run.id)
     return run
+
+@app.post("/agent/runs/{run_id}/scenes/{scene_id}/retry", response_model=AgentRun)
+async def retry_agent_scene(
+    run_id: str,
+    scene_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: UserRecord = Depends(get_current_user),
+):
+    run = agent_runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if current_user.role != "admin" and run.userId != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot retry this Agent run")
+
+    run = sync_run_from_shots(run)
+    scene = next((item for item in run.scenes if item.id == scene_id), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    if scene.status != "failed":
+        raise HTTPException(status_code=409, detail="只有失败的分镜可以单独重试")
+
+    retry_cost = get_scene_credit_cost(run, scene)
+    charge_user_credits(
+        run.userEmail,
+        retry_cost,
+        f"分镜重试扣费：{scene.number} / {scene.title} / {run.jimengModel}",
+        run_id=run.id,
+    )
+
+    run.scenes = [
+        copy_model_with_update(item, {
+            "status": "queued",
+            "progress": 0,
+            "videoUrl": None,
+            "error": None,
+            "creditRefundedAt": None,
+            "refundCredit": 0,
+            "retryCount": item.retryCount + 1,
+        })
+        if item.id == scene_id
+        else item
+        for item in run.scenes
+    ]
+    run.status = "generating"
+    run.stage = "jimeng_dispatch"
+    run.creditCost += retry_cost
+    run.progress = max(run.progress, 20)
+    run.error = None
+    run.updatedAt = time.time()
+    shots_db[scene_id] = Shot(
+        id=scene_id,
+        prompt=scene.prompt,
+        duration=scene.duration,
+        engine="jimeng",
+        status="waiting",
+        progress=0,
+        caption=f"{scene.title} / {run.ratio}",
+    )
+    agent_runs[run.id] = run
+    background_tasks.add_task(process_scene_retry, run.id, scene_id)
+    return sync_run_from_shots(run)
 
 @app.get("/agent/runs/{run_id}", response_model=AgentRun)
 def get_agent_run(run_id: str, current_user: UserRecord = Depends(get_current_user)):

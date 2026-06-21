@@ -7,9 +7,11 @@ import {
   CreditCard,
   Loader2,
   LogOut,
+  MessageCircle,
   RefreshCw,
   Sparkles,
   WandSparkles,
+  X,
 } from 'lucide-react';
 import { BrandLogo, CreditNavButton, UserIdentityButton } from '../components/AppChrome';
 import CreditConsole from '../components/CreditConsole';
@@ -21,6 +23,7 @@ const PAYMENT_QR_SRC = '/payment/alipay-qr.jpg';
 function getTransactionMeta(transaction) {
   if (transaction.type === 'recharge') return { label: '充值', tone: 'recharge', sign: '+' };
   if (transaction.type === 'debit') return { label: '使用', tone: 'debit', sign: '' };
+  if (transaction.type === 'refund') return { label: '返还', tone: 'bonus', sign: '+' };
   if (transaction.type === 'bonus') return { label: '赠送', tone: 'bonus', sign: '+' };
   return { label: transaction.type || '记录', tone: 'neutral', sign: transaction.amount > 0 ? '+' : '' };
 }
@@ -61,7 +64,7 @@ function CreditTransactionList({ emptyText, title, transactions }) {
   );
 }
 
-function RechargePaymentPanel({ canceling, panelRef, request, onCancel, onClose, onRefresh }) {
+function RechargePaymentPanel({ canceling, markingPaid, panelRef, request, onCancel, onClose, onPaid, onRefresh }) {
   if (!request) return null;
   const statusMeta = getRechargeRequestStatusMeta(request.status);
 
@@ -105,9 +108,18 @@ function RechargePaymentPanel({ canceling, panelRef, request, onCancel, onClose,
               </div>
             </dl>
             <div className="payment-actions">
-              <button className="primary-button" type="button" onClick={onRefresh}>
-                <RefreshCw size={18} />
-                我已付款，刷新状态
+              <button
+                className="primary-button"
+                disabled={markingPaid || request.status !== 'pending'}
+                type="button"
+                onClick={() => onPaid(request)}
+              >
+                {markingPaid ? <Loader2 className="spin" size={18} /> : <CreditCard size={18} />}
+                {request.status === 'processing' ? '已提交，等待发放' : markingPaid ? '正在提交' : '我已付款'}
+              </button>
+              <button className="ghost-button" type="button" onClick={onRefresh}>
+                <RefreshCw size={16} />
+                刷新状态
               </button>
               {request.status === 'pending' ? (
                 <button className="ghost-button danger" disabled={canceling} type="button" onClick={() => onCancel(request.id)}>
@@ -122,6 +134,47 @@ function RechargePaymentPanel({ canceling, panelRef, request, onCancel, onClose,
             </div>
           </div>
         </div>
+      </article>
+    </section>
+  );
+}
+
+function PaymentSubmittedDialog({ request, onClose }) {
+  if (!request) return null;
+  return (
+    <section className="payment-modal-backdrop compact" role="dialog" aria-modal="true" aria-label="订单已提交">
+      <article className="notice-dialog">
+        <button className="icon-button notice-close" title="关闭" type="button" onClick={onClose}>
+          <X size={18} />
+        </button>
+        <span className="notice-icon">
+          <CreditCard size={24} />
+        </span>
+        <h2>订单信息已提交、积分审核后立即发放</h2>
+        <p>订单 {request.id} 已进入发放中，请保留付款记录，管理员确认后积分会自动入账。</p>
+        <button className="primary-button" type="button" onClick={onClose}>
+          知道了
+        </button>
+      </article>
+    </section>
+  );
+}
+
+function ContactServiceDialog({ onClose }) {
+  return (
+    <section className="payment-modal-backdrop compact" role="dialog" aria-modal="true" aria-label="联系客服">
+      <article className="notice-dialog">
+        <button className="icon-button notice-close" title="关闭" type="button" onClick={onClose}>
+          <X size={18} />
+        </button>
+        <span className="notice-icon">
+          <MessageCircle size={24} />
+        </span>
+        <h2>联系客服</h2>
+        <p>请添加客服 QQ：873831183。联系时请截图订单号与付款记录，方便快速核对并处理积分发放。</p>
+        <button className="primary-button" type="button" onClick={onClose}>
+          知道了
+        </button>
       </article>
     </section>
   );
@@ -174,6 +227,7 @@ export default function CreditPage({ auth, billingState, onLogout, onShowCreate,
     billingError,
     cancelRechargeRequest,
     handleRecharge,
+    markRechargeRequestPaid,
     rechargeRequests,
     rechargingPackageId,
     refreshBilling,
@@ -182,13 +236,16 @@ export default function CreditPage({ auth, billingState, onLogout, onShowCreate,
   const [selectedRechargePackageId, setSelectedRechargePackageId] = useState('');
   const [paymentRequest, setPaymentRequest] = useState(null);
   const [cancelingRequestId, setCancelingRequestId] = useState('');
+  const [markingPaidRequestId, setMarkingPaidRequestId] = useState('');
+  const [submittedPaymentRequest, setSubmittedPaymentRequest] = useState(null);
+  const [showContactService, setShowContactService] = useState(false);
   const paymentPanelRef = useRef(null);
   const balance = billing?.balance ?? auth?.user?.creditBalance ?? 0;
   const transactions = billing?.transactions || [];
   const usageTransactions = transactions.filter((transaction) => transaction.type === 'debit');
   const rechargeTransactions = transactions.filter((transaction) => transaction.type === 'recharge');
   const bonusTransactions = transactions.filter((transaction) => transaction.type === 'bonus');
-  const pendingRechargeRequests = (rechargeRequests || []).filter((request) => request.status === 'pending');
+  const pendingRechargeRequests = (rechargeRequests || []).filter((request) => ['pending', 'processing'].includes(request.status));
 
   async function handleConfirmRecharge() {
     if (!selectedRechargePackageId) return;
@@ -213,6 +270,21 @@ export default function CreditPage({ auth, billingState, onLogout, onShowCreate,
       const updatedRequest = nextRequests.find((request) => request.id === paymentRequest.id);
       if (updatedRequest) setPaymentRequest(updatedRequest);
     }
+  }
+
+  async function handleMarkPaymentPaid(request) {
+    if (!request?.id || markingPaidRequestId) return;
+    setMarkingPaidRequestId(request.id);
+    const paidRequest = await markRechargeRequestPaid?.(request.id);
+    if (paidRequest) {
+      await Promise.all([
+        refreshBilling(),
+        refreshRechargeRequests?.(),
+      ]);
+      setPaymentRequest(null);
+      setSubmittedPaymentRequest(paidRequest);
+    }
+    setMarkingPaidRequestId('');
   }
 
   async function handleCancelPaymentRequest(requestId) {
@@ -282,12 +354,32 @@ export default function CreditPage({ auth, billingState, onLogout, onShowCreate,
 
         <RechargePaymentPanel
           canceling={cancelingRequestId === paymentRequest?.id}
+          markingPaid={markingPaidRequestId === paymentRequest?.id}
           panelRef={paymentPanelRef}
           request={paymentRequest}
           onCancel={handleCancelPaymentRequest}
           onClose={() => setPaymentRequest(null)}
+          onPaid={handleMarkPaymentPaid}
           onRefresh={handleRefreshPaymentStatus}
         />
+
+        <PaymentSubmittedDialog
+          request={submittedPaymentRequest}
+          onClose={() => setSubmittedPaymentRequest(null)}
+        />
+
+        {showContactService ? (
+          <ContactServiceDialog onClose={() => setShowContactService(false)} />
+        ) : null}
+
+        <button
+          className="contact-service-fab"
+          type="button"
+          onClick={() => setShowContactService(true)}
+        >
+          <MessageCircle size={20} />
+          <span>联系客服</span>
+        </button>
 
         {auth?.user?.role !== 'admin' ? (
           <RechargeRequestHistory

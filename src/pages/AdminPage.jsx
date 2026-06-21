@@ -263,7 +263,7 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
   const jimengSummary = jimengAccount?.summary || {};
   const recentJimengTasks = Array.isArray(jimengAccount?.tasks) ? jimengAccount.tasks : [];
   const creditBalance = billingState?.billing?.balance ?? auth?.user?.creditBalance ?? 0;
-  const pendingRechargeCount = rechargeRequests.filter((request) => request.status === 'pending').length;
+  const pendingRechargeCount = rechargeRequests.filter((request) => ['pending', 'processing'].includes(request.status)).length;
 
   const statCards = [
     { label: '注册用户', value: stats?.totalUsers ?? '-', icon: Users },
@@ -784,7 +784,7 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
                   rechargeRequests.map((request) => {
                     const statusMeta = getRechargeRequestStatusMeta(request.status);
                     const actionLocked = reviewingRequestId.startsWith(request.id);
-                    const isPending = request.status === 'pending';
+                    const isPending = ['pending', 'processing'].includes(request.status);
                     const selectedCredits = selectedRechargeCredits[request.id];
                     return (
                       <div className="admin-recharge-row" key={request.id}>

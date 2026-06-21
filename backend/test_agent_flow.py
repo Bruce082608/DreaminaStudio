@@ -87,6 +87,7 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         main.database.init_database()
         main.agent_runs.clear()
         main.shots_db.clear()
+        main.uploaded_references.clear()
         main.task_queue = asyncio.Queue()
 
     async def asyncTearDown(self):
@@ -199,6 +200,128 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(candidate.scenes), 3)
         self.assertIn("「你好」", candidate.scenes[0].prompt)
 
+    def test_scene_prompt_uses_referenced_image_subset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reference_dir = Path(temp_dir)
+            image_one = reference_dir / "one.png"
+            image_two = reference_dir / "two.png"
+            image_one.write_bytes(b"fake-one")
+            image_two.write_bytes(b"fake-two")
+            main.uploaded_references.clear()
+            main.uploaded_references.update(
+                {
+                    "ref-1": main.UploadedReference(
+                        id="ref-1",
+                        userId="user-ref",
+                        name="人物.png",
+                        path=str(image_one),
+                    ),
+                    "ref-2": main.UploadedReference(
+                        id="ref-2",
+                        userId="user-ref",
+                        name="产品.png",
+                        path=str(image_two),
+                    ),
+                }
+            )
+            run = main.AgentRun(
+                id="agent-ref",
+                userId="user-ref",
+                userEmail="ref@example.com",
+                idea="让 @图片2 出现在桌面上",
+                duration=15,
+                segmentDuration=15,
+                style="电影感",
+                ratio="16:9",
+                imageNames=["人物.png", "产品.png"],
+                imageIds=["ref-1", "ref-2"],
+                imageReferences=[
+                    main.AgentImageReference(id="ref-1", name="人物.png", label="图片1", token="@图片1"),
+                    main.AgentImageReference(id="ref-2", name="产品.png", label="图片2", token="@图片2"),
+                ],
+                createdAt=main.time.time(),
+                updatedAt=main.time.time(),
+            )
+            scene = main.AgentRunScene(
+                id="scene-ref",
+                number="01",
+                time="0:00 - 0:15",
+                title="产品展示",
+                prompt="特写 @图片2 放在木桌中央，柔和光线。",
+                duration=15,
+            )
+
+            prompt, paths = main.prepare_scene_prompt_and_references(run, scene)
+
+            self.assertEqual(paths, [image_two])
+            self.assertIn("@image_file_1=图片2", prompt)
+            self.assertIn("@image_file_1 放在木桌中央", prompt)
+            self.assertNotIn("@图片2", prompt)
+
+    def test_storyboard_prompt_includes_scene_and_sound_constraints(self):
+        payload = main.AgentCreatePayload(
+            idea="角色在室内完成产品展示。",
+            duration=15,
+            segmentDuration=15,
+            style="跟随参考图",
+            ratio="21:9",
+            sceneLimit="所有镜头都发生在白色极简展厅。",
+            blockSubtitles=True,
+            soundEffectOnly=True,
+            forceMute=False,
+        )
+
+        prompt = main.build_storyboard_prompt(payload)
+
+        self.assertIn("所有镜头都发生在白色极简展厅", prompt)
+        self.assertIn("不要出现任何字幕", prompt)
+        self.assertIn("不要有任何背景音乐，只保留音效", prompt)
+        self.assertIn("21:9", prompt)
+
+    def test_failed_scene_refund_is_recorded_once(self):
+        user = main.UserRecord(
+            id="user-refund",
+            name="退款用户",
+            email="refund@example.com",
+            passwordHash="not-used",
+            creditBalance=0,
+            createdAt=main.time.time(),
+        )
+        main.save_users({user.email: user})
+        run = main.AgentRun(
+            id="agent-refund",
+            userId=user.id,
+            userEmail=user.email,
+            idea="测试失败退款",
+            duration=15,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            jimengModel="seedance2.0fast",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+        )
+        scene = main.AgentRunScene(
+            id="scene-refund",
+            number="01",
+            time="0:00 - 0:15",
+            title="失败片段",
+            prompt="测试提示词",
+            duration=15,
+        )
+        run.scenes = [scene]
+
+        main.refund_failed_scene_if_needed(run, scene)
+        main.refund_failed_scene_if_needed(run, scene)
+        refunded_user = main.load_users()[user.email]
+        transactions = main.load_credit_transactions()
+
+        self.assertEqual(refunded_user.creditBalance, 30)
+        self.assertEqual(len(transactions), 1)
+        self.assertEqual(transactions[0].type, "refund")
+        self.assertEqual(run.scenes[0].refundCredit, 30)
+        self.assertIsNotNone(run.scenes[0].creditRefundedAt)
+
     def test_json_user_migration_accepts_utf8_bom(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
@@ -308,6 +431,13 @@ Dreamina CLI
         self.assertEqual(recharge_request.credits, 100)
         self.assertEqual(unchanged_user.creditBalance, 15)
         self.assertEqual(len(main.load_admin_recharge_requests(status="pending")), 1)
+
+        paid_request = main.mark_my_recharge_request_paid(recharge_request.id, user)
+        still_unchanged_user = main.load_users()[user.email]
+
+        self.assertEqual(paid_request.status, "processing")
+        self.assertEqual(still_unchanged_user.creditBalance, 15)
+        self.assertEqual(len(main.load_admin_recharge_requests(status="processing")), 1)
 
         with self.assertRaises(main.HTTPException):
             main.approve_admin_recharge_request(

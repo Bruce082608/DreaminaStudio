@@ -59,7 +59,7 @@ export default function CreditConsole({
                 <span>
                   <strong>{packageItem.credits}积分</strong>
                   {pendingRequest ? (
-                    <em className="pending">待付款</em>
+                    <em className="pending">{pendingRequest.status === 'processing' ? '发放中' : '待付款'}</em>
                   ) : packageItem.badge ? (
                     <em>{firstUsed ? '已使用' : packageItem.badge}</em>
                   ) : null}

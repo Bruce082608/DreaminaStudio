@@ -12,8 +12,8 @@ export const durationOptions = [
 
 export const segmentDurationOptions = [5, 10, 15];
 
-export const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片'];
-export const ratioOptions = ['16:9', '9:16', '1:1'];
+export const styleOptions = ['电影感', '写实', '动漫', '商业广告', 'MV', '纪录片', '跟随参考图'];
+export const ratioOptions = ['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'];
 
 export const jimengModelOptions = [
   {

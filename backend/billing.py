@@ -214,10 +214,10 @@ def create_recharge_request_for_user(
     if package.firstPurchaseOnly and user_has_recharged(user, transactions_file):
         raise HTTPException(status_code=400, detail="首充尝鲜包仅限首次充值")
 
-    pending_requests = load_recharge_requests(status="pending", user_id=user.id, limit=50)
-    for pending_request in pending_requests:
-        if pending_request.packageId == package.id:
-            return pending_request
+    active_requests = load_recharge_requests(user_id=user.id, limit=50)
+    for active_request in active_requests:
+        if active_request.packageId == package.id and active_request.status in {"pending", "processing"}:
+            return active_request
 
     request = RechargeRequest(
         id=f"recharge-{int(time.time() * 1000)}-{secrets.token_hex(4)}",
@@ -311,7 +311,7 @@ def apply_recharge_request_approval(
     admin_note: Optional[str] = None,
 ) -> Tuple[RechargeRequest, CreditTransaction]:
     recharge_request = get_recharge_request(request_id)
-    if recharge_request.status != "pending":
+    if recharge_request.status not in {"pending", "processing"}:
         raise HTTPException(status_code=400, detail="该充值申请已处理")
 
     user_key, user = find_user_for_recharge_request(users, recharge_request)
@@ -364,7 +364,7 @@ def reject_recharge_request(
     admin_note: Optional[str] = None,
 ) -> RechargeRequest:
     recharge_request = get_recharge_request(request_id)
-    if recharge_request.status != "pending":
+    if recharge_request.status not in {"pending", "processing"}:
         raise HTTPException(status_code=400, detail="该充值申请已处理")
 
     updated_request = database.update_recharge_request(
@@ -374,6 +374,27 @@ def reject_recharge_request(
             "handledAt": time.time(),
             "handledBy": get_user_contact(admin_user),
             "adminNote": admin_note or "管理员已驳回",
+        },
+    )
+    if not updated_request:
+        raise HTTPException(status_code=404, detail="充值申请不存在")
+    return RechargeRequest(**updated_request)
+
+def mark_recharge_request_paid(request_id: str, user: Any) -> RechargeRequest:
+    recharge_request = get_recharge_request(request_id)
+    contact = get_user_contact(user).lower()
+    if recharge_request.userId != user.id and recharge_request.userEmail.lower() != contact:
+        raise HTTPException(status_code=403, detail="无权操作该充值订单")
+    if recharge_request.status == "processing":
+        return recharge_request
+    if recharge_request.status != "pending":
+        raise HTTPException(status_code=400, detail="该充值订单已处理，无法标记付款")
+
+    updated_request = database.update_recharge_request(
+        request_id,
+        {
+            "status": "processing",
+            "adminNote": "用户已付款，等待管理员发放积分",
         },
     )
     if not updated_request:

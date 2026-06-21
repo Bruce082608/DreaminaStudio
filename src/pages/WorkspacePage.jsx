@@ -40,6 +40,7 @@ import {
 
 import StatusPill from '../components/workspace/StatusPill';
 import {
+  AGENT_FAST_POLL_INTERVAL,
   AGENT_POLL_INTERVAL,
   agentStageIndexes,
   agentStageLabels,
@@ -49,9 +50,72 @@ import {
 } from '../config/workspace';
 import { createScenes } from '../utils/workspace';
 
+const MAX_REFERENCE_IMAGES = 9;
+const MAX_SCENE_IMAGES = 9;
+
+function getReferenceLabel(index) {
+  return `图片${index + 1}`;
+}
+
+function getSceneImageLabel(index) {
+  return `场景${index + 1}`;
+}
+
+function createReferenceImageId(file) {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `${file.name}-${file.lastModified}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getReferenceMentionState(value, caretPosition) {
+  const beforeCaret = value.slice(0, caretPosition);
+  const match = /(^|\s)@([^@\s]*)$/.exec(beforeCaret);
+  if (!match) return null;
+  return {
+    start: match.index + match[1].length,
+    end: caretPosition,
+    query: match[2] || '',
+  };
+}
+
+function isSegmentDurationAvailable(totalDuration, singleDuration) {
+  return totalDuration % singleDuration === 0 && Math.ceil(totalDuration / singleDuration) <= 40;
+}
+
+function getPreferredSegmentDuration(totalDuration) {
+  return [...segmentDurationOptions]
+    .reverse()
+    .find((option) => isSegmentDurationAvailable(totalDuration, option)) || segmentDurationOptions[0];
+}
+
+function mapAgentSceneStatus(status) {
+  return {
+    completed: 'done',
+    generating: 'active',
+    failed: 'failed',
+    waiting: 'waiting',
+    queued: 'queued',
+  }[status] || 'queued';
+}
+
+function getNextPollInterval(latestRun) {
+  if (latestRun.status === 'generating' || String(latestRun.stage || '').startsWith('jimeng')) {
+    return AGENT_POLL_INTERVAL;
+  }
+  return AGENT_FAST_POLL_INTERVAL;
+}
+
+function formatRefreshTime(timestamp) {
+  if (!timestamp) return '尚未同步';
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+}
+
 export default function WorkspacePage({ auth, billingState, onShowCredits, onShowIntro, onShowAdmin, onShowProfile, onLogout }) {
   const timers = useRef([]);
   const imageUrls = useRef(new Set());
+  const ideaTextareaRef = useRef(null);
   const scenesRef = useRef([]);
   const [idea, setIdea] = useState(initialWorkspace.idea);
   const [duration, setDuration] = useState(initialWorkspace.duration);
@@ -60,6 +124,11 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const [ratio, setRatio] = useState(initialWorkspace.ratio);
   const [jimengModel, setJimengModel] = useState(initialWorkspace.jimengModel);
   const [images, setImages] = useState([]);
+  const [sceneLimit, setSceneLimit] = useState('');
+  const [sceneImages, setSceneImages] = useState([]);
+  const [blockSubtitles, setBlockSubtitles] = useState(true);
+  const [soundEffectOnly, setSoundEffectOnly] = useState(false);
+  const [forceMute, setForceMute] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -72,6 +141,15 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
   const [runStatus, setRunStatus] = useState('idle');
+  const [referenceMenu, setReferenceMenu] = useState({
+    open: false,
+    start: 0,
+    end: 0,
+    query: '',
+    selectedIndex: 0,
+  });
+  const [lastProgressRefreshAt, setLastProgressRefreshAt] = useState(null);
+  const [retryingSceneId, setRetryingSceneId] = useState('');
   const { billing, refreshBilling } = billingState;
 
   scenesRef.current = scenes;
@@ -106,6 +184,65 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const activeCreditCost = isStoryboardReview ? storyboardCreditCost : estimatedCreditCost;
   const creditBalance = billing?.balance ?? auth?.user?.creditBalance ?? 0;
   const hasEnoughCredits = creditBalance >= activeCreditCost;
+  const referenceImages = useMemo(
+    () => images.map((image, index) => ({
+      ...image,
+      refName: image.refName || getReferenceLabel(index),
+      token: `@${image.refName || getReferenceLabel(index)}`,
+    })),
+    [images],
+  );
+  const sceneReferenceImages = useMemo(
+    () => sceneImages.map((image, index) => ({
+      ...image,
+      refName: image.refName || getSceneImageLabel(index),
+      token: `@${image.refName || getSceneImageLabel(index)}`,
+    })),
+    [sceneImages],
+  );
+  const referenceMenuOptions = useMemo(() => {
+    if (!referenceMenu.open) return [];
+    const query = referenceMenu.query.trim().toLowerCase();
+    return referenceImages.filter((image) => {
+      if (!query) return true;
+      return image.refName.toLowerCase().includes(query) || image.name.toLowerCase().includes(query);
+    });
+  }, [referenceImages, referenceMenu.open, referenceMenu.query]);
+  const queueSummary = useMemo(() => {
+    const counts = scenes.reduce(
+      (summary, scene) => {
+        const status = scene.status || 'queued';
+        return { ...summary, [status]: (summary[status] || 0) + 1 };
+      },
+      { queued: 0, waiting: 0, active: 0, done: 0, failed: 0 },
+    );
+    const total = scenes.length;
+    const outOfQueue = counts.done + counts.active + counts.failed;
+    const queueProgress = total > 0 ? Math.round((outOfQueue / total) * 100) : progress;
+    const label = counts.failed > 0
+      ? '存在失败'
+      : runStatus === 'generating'
+      ? counts.active > 0 ? '生成中' : counts.waiting > 0 ? '等待中' : '排队中'
+      : runStatus === 'awaiting_confirmation'
+        ? '等待确认'
+        : runStatus === 'completed'
+          ? '已完成'
+          : runStatus === 'failed'
+            ? '处理失败'
+            : scenes.length > 0 ? '排队中' : '待提交';
+
+    return {
+      ...counts,
+      total,
+      queueProgress,
+      label,
+    };
+  }, [progress, runStatus, scenes]);
+  const failedScenes = useMemo(
+    () => scenes.filter((scene) => scene.status === 'failed'),
+    [scenes],
+  );
+  const progressRefreshLabel = formatRefreshTime(lastProgressRefreshAt);
 
   useEffect(() => {
     const activeImageUrls = imageUrls.current;
@@ -131,10 +268,21 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   }, []);
 
   useEffect(() => {
-    if (Math.ceil(duration / segmentDuration) > 40) {
-      setSegmentDuration(15);
+    if (!isSegmentDurationAvailable(duration, segmentDuration)) {
+      setSegmentDuration(getPreferredSegmentDuration(duration));
     }
   }, [duration, segmentDuration]);
+
+  useEffect(() => {
+    if (!referenceMenu.open) return;
+    if (referenceMenuOptions.length === 0) {
+      setReferenceMenu((current) => ({ ...current, selectedIndex: 0 }));
+      return;
+    }
+    if (referenceMenu.selectedIndex >= referenceMenuOptions.length) {
+      setReferenceMenu((current) => ({ ...current, selectedIndex: 0 }));
+    }
+  }, [referenceMenu.open, referenceMenu.selectedIndex, referenceMenuOptions.length]);
 
   useEffect(() => {
     if (runStatus !== 'idle') return;
@@ -156,17 +304,91 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     timers.current = [];
   }
 
+  function closeReferenceMenu() {
+    setReferenceMenu((current) => ({ ...current, open: false, selectedIndex: 0 }));
+  }
+
+  function updateReferenceMenuForCaret(value, caretPosition) {
+    if (runLocked || referenceImages.length === 0) {
+      closeReferenceMenu();
+      return;
+    }
+
+    const mentionState = getReferenceMentionState(value, caretPosition);
+    if (!mentionState) {
+      closeReferenceMenu();
+      return;
+    }
+
+    setReferenceMenu({
+      open: true,
+      start: mentionState.start,
+      end: mentionState.end,
+      query: mentionState.query,
+      selectedIndex: 0,
+    });
+  }
+
+  function handleIdeaChange(event) {
+    const nextIdea = event.target.value;
+    setIdea(nextIdea);
+    updateReferenceMenuForCaret(nextIdea, event.target.selectionStart);
+  }
+
+  function insertReferenceMention(image) {
+    const token = image.token || `@${image.refName}`;
+    const nextCaretPosition = referenceMenu.start + token.length + 1;
+    setIdea((currentIdea) => {
+      const before = currentIdea.slice(0, referenceMenu.start);
+      const after = currentIdea.slice(referenceMenu.end);
+      const suffix = after.startsWith(' ') || after.startsWith('\n') || after.length === 0 ? after : ` ${after}`;
+      return `${before}${token} ${suffix}`;
+    });
+    closeReferenceMenu();
+    requestAnimationFrame(() => {
+      ideaTextareaRef.current?.focus();
+      ideaTextareaRef.current?.setSelectionRange(nextCaretPosition, nextCaretPosition);
+    });
+  }
+
+  function handleIdeaKeyDown(event) {
+    if (!referenceMenu.open || referenceMenuOptions.length === 0) return;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setReferenceMenu((current) => ({
+        ...current,
+        selectedIndex: (current.selectedIndex + 1) % referenceMenuOptions.length,
+      }));
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setReferenceMenu((current) => ({
+        ...current,
+        selectedIndex: (current.selectedIndex - 1 + referenceMenuOptions.length) % referenceMenuOptions.length,
+      }));
+      return;
+    }
+
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      insertReferenceMention(referenceMenuOptions[referenceMenu.selectedIndex]);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeReferenceMenu();
+    }
+  }
+
   function syncAgentRun(latestRun) {
     let syncedScenes = latestRun.scenes.length > 0
       ? latestRun.scenes.map((scene) => ({
           ...scene,
-          status: scene.status === 'completed'
-            ? 'done'
-            : scene.status === 'generating'
-              ? 'active'
-              : scene.status === 'failed'
-                ? 'failed'
-                : 'queued',
+          status: mapAgentSceneStatus(scene.status),
         }))
       : scenesRef.current;
 
@@ -183,6 +405,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setRunStatus(latestRun.status);
     setStageIndex(agentStageIndexes[latestRun.stage] ?? 0);
     setApiStatus(`任务状态：${agentStageLabels[latestRun.stage] || latestRun.stage}`);
+    setLastProgressRefreshAt(Date.now());
 
     if (latestRun.finalVideoUrl) {
       setFinalVideoUrl(latestRun.finalVideoUrl);
@@ -201,6 +424,9 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
         authToken: auth?.token,
       });
       const isFinished = syncAgentRun(latestRun);
+      if (latestRun.scenes?.some((scene) => scene.creditRefundedAt)) {
+        await refreshBilling();
+      }
 
       if (isFinished) {
         clearTaskTimers();
@@ -208,7 +434,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
         return;
       }
 
-      timers.current = [setTimeout(() => pollAgentRun(runId), AGENT_POLL_INTERVAL)];
+      timers.current = [setTimeout(() => pollAgentRun(runId), getNextPollInterval(latestRun))];
     } catch (error) {
       clearTaskTimers();
       setApiError(error.message);
@@ -219,20 +445,37 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
 
   function handleImageUpload(event) {
     const files = Array.from(event.target.files || []);
-    const nextImages = files.slice(0, 6).map((file) => ({
-      id: `${file.name}-${file.lastModified}`,
-      name: file.name,
-      url: URL.createObjectURL(file),
-      file,
-      uploadId: '',
-    }));
+    const availableSlots = Math.max(MAX_REFERENCE_IMAGES - images.length, 0);
+    const acceptedFiles = files.slice(0, availableSlots);
+
+    if (files.length > availableSlots) {
+      setApiError(`最多同时上传 ${MAX_REFERENCE_IMAGES} 张参考图片，已保留前 ${MAX_REFERENCE_IMAGES} 张。`);
+    }
+
+    const nextImages = acceptedFiles.map((file, fileIndex) => {
+      const refName = getReferenceLabel(images.length + fileIndex);
+      return {
+        id: createReferenceImageId(file),
+        refName,
+        token: `@${refName}`,
+        name: file.name,
+        url: URL.createObjectURL(file),
+        file,
+        uploadId: '',
+      };
+    });
+
+    if (nextImages.length === 0) {
+      event.target.value = '';
+      return;
+    }
 
     nextImages.forEach((image) => imageUrls.current.add(image.url));
 
     setImages((current) => {
       const allImages = [...current, ...nextImages];
-      const visibleImages = allImages.slice(0, 6);
-      allImages.slice(6).forEach((image) => {
+      const visibleImages = allImages.slice(0, MAX_REFERENCE_IMAGES);
+      allImages.slice(MAX_REFERENCE_IMAGES).forEach((image) => {
         URL.revokeObjectURL(image.url);
         imageUrls.current.delete(image.url);
       });
@@ -240,6 +483,60 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     });
 
     event.target.value = '';
+  }
+
+  function handleSceneImageUpload(event) {
+    const files = Array.from(event.target.files || []);
+    const availableSlots = Math.max(MAX_SCENE_IMAGES - sceneImages.length, 0);
+    const acceptedFiles = files.slice(0, availableSlots);
+
+    if (files.length > availableSlots) {
+      setApiError(`最多同时上传 ${MAX_SCENE_IMAGES} 张场景图片。`);
+    }
+
+    const nextImages = acceptedFiles.map((file, fileIndex) => {
+      const refName = getSceneImageLabel(sceneImages.length + fileIndex);
+      return {
+        id: createReferenceImageId(file),
+        refName,
+        token: `@${refName}`,
+        name: file.name,
+        url: URL.createObjectURL(file),
+        file,
+        uploadId: '',
+      };
+    });
+
+    if (nextImages.length === 0) {
+      event.target.value = '';
+      return;
+    }
+
+    nextImages.forEach((image) => imageUrls.current.add(image.url));
+
+    setSceneImages((current) => {
+      const allImages = [...current, ...nextImages];
+      const visibleImages = allImages.slice(0, MAX_SCENE_IMAGES);
+      allImages.slice(MAX_SCENE_IMAGES).forEach((image) => {
+        URL.revokeObjectURL(image.url);
+        imageUrls.current.delete(image.url);
+      });
+      return visibleImages;
+    });
+
+    event.target.value = '';
+  }
+
+  function toggleSoundEffectOnly(event) {
+    const checked = event.target.checked;
+    setSoundEffectOnly(checked);
+    if (checked) setForceMute(false);
+  }
+
+  function toggleForceMute(event) {
+    const checked = event.target.checked;
+    setForceMute(checked);
+    if (checked) setSoundEffectOnly(false);
   }
 
   async function handleSubmit({ regenerate = false } = {}) {
@@ -269,9 +566,10 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setFinalVideoUrl('');
     setCandidates([]);
     setSelectedCandidateId('');
+    setLastProgressRefreshAt(Date.now());
 
     try {
-      const uploadedImages = await Promise.all(images.map(async (image) => {
+      const uploadedImages = await Promise.all(referenceImages.map(async (image) => {
         if (image.uploadId) return image;
         const formData = new FormData();
         formData.append('image', image.file, image.name);
@@ -283,6 +581,38 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
         return { ...image, uploadId: uploaded.id };
       }));
       setImages(uploadedImages);
+
+      const uploadedSceneImages = await Promise.all(sceneReferenceImages.map(async (image) => {
+        if (image.uploadId) return image;
+        const formData = new FormData();
+        formData.append('image', image.file, image.name);
+        const uploaded = await apiRequest('/agent/uploads', {
+          method: 'POST',
+          authToken: auth?.token,
+          body: formData,
+        });
+        return { ...image, uploadId: uploaded.id };
+      }));
+      setSceneImages(uploadedSceneImages);
+
+      const imageReferences = uploadedImages.map((image, index) => {
+        const refName = image.refName || getReferenceLabel(index);
+        return {
+          id: image.uploadId,
+          name: image.name,
+          label: refName,
+          token: `@${refName}`,
+        };
+      });
+      const sceneImageReferences = uploadedSceneImages.map((image, index) => {
+        const refName = image.refName || getSceneImageLabel(index);
+        return {
+          id: image.uploadId,
+          name: image.name,
+          label: refName,
+          token: `@${refName}`,
+        };
+      });
 
       const agentRun = await apiRequest('/agent/runs', {
         method: 'POST',
@@ -296,6 +626,14 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
           jimengModel,
           imageNames: uploadedImages.map((image) => image.name),
           imageIds: uploadedImages.map((image) => image.uploadId),
+          imageReferences,
+          sceneLimit,
+          sceneImageNames: uploadedSceneImages.map((image) => image.name),
+          sceneImageIds: uploadedSceneImages.map((image) => image.uploadId),
+          sceneImageReferences,
+          blockSubtitles,
+          soundEffectOnly,
+          forceMute,
         }),
       });
 
@@ -369,9 +707,37 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     }
   }
 
+  async function handleRetryScene(scene) {
+    if (!activeRunId || !scene?.id || scene.status !== 'failed' || retryingSceneId) return;
+    setRetryingSceneId(scene.id);
+    setApiError('');
+    clearTaskTimers();
+
+    try {
+      const retriedRun = await apiRequest(
+        `/agent/runs/${encodeURIComponent(activeRunId)}/scenes/${encodeURIComponent(scene.id)}/retry`,
+        {
+          method: 'POST',
+          authToken: auth?.token,
+        },
+      );
+      syncAgentRun(retriedRun);
+      await refreshBilling();
+      timers.current = [setTimeout(() => pollAgentRun(activeRunId), 400)];
+    } catch (error) {
+      setApiError(error.message);
+    } finally {
+      setRetryingSceneId('');
+    }
+  }
+
   function resetWorkspace() {
     clearTaskTimers();
     images.forEach((image) => {
+      URL.revokeObjectURL(image.url);
+      imageUrls.current.delete(image.url);
+    });
+    sceneImages.forEach((image) => {
       URL.revokeObjectURL(image.url);
       imageUrls.current.delete(image.url);
     });
@@ -383,6 +749,11 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setRatio(initialWorkspace.ratio);
     setJimengModel(initialWorkspace.jimengModel);
     setImages([]);
+    setSceneLimit('');
+    setSceneImages([]);
+    setBlockSubtitles(true);
+    setSoundEffectOnly(false);
+    setForceMute(false);
     setScenes([]);
     setCandidates([]);
     setSelectedCandidateId('');
@@ -395,6 +766,9 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setFinalVideoUrl('');
     setRunStatus('idle');
     setApiStatus('创作服务已连接');
+    setLastProgressRefreshAt(null);
+    setRetryingSceneId('');
+    closeReferenceMenu();
   }
 
   return (
@@ -458,34 +832,132 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
             <small>{apiStatus}</small>
           </div>
 
-          <label className="idea-composer">
+          <div className="idea-composer">
             <span>视频想法</span>
             <textarea
+              ref={ideaTextareaRef}
               value={idea}
-              onChange={(event) => setIdea(event.target.value)}
+              onChange={handleIdeaChange}
+              onKeyDown={handleIdeaKeyDown}
+              onSelect={(event) => updateReferenceMenuForCaret(event.target.value, event.target.selectionStart)}
               placeholder="描述你想制作的视频，可以很粗略。"
               disabled={runLocked}
             />
-          </label>
+            {referenceMenu.open && referenceMenuOptions.length > 0 ? (
+              <div className="reference-mention-menu">
+                {referenceMenuOptions.map((image, index) => (
+                  <button
+                    className={index === referenceMenu.selectedIndex ? 'selected' : ''}
+                    key={image.id}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => insertReferenceMention(image)}
+                    type="button"
+                  >
+                    <img src={image.url} alt="" />
+                    <span>
+                      <strong>@{image.refName}</strong>
+                      <small>{image.name}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
           <div className="upload-strip">
             <label className="upload-drop">
               <input type="file" accept="image/*" multiple onChange={handleImageUpload} disabled={runLocked} />
               <UploadCloud size={20} />
-              <span>上传参考图片</span>
+              <span>上传参考图片 {images.length}/{MAX_REFERENCE_IMAGES}</span>
             </label>
             <div className="image-preview-row">
-              {images.length === 0 ? (
+              {referenceImages.length === 0 ? (
                 <div className="empty-image-slot">
                   <ImagePlus size={19} />
                   <span>人物 / 场景 / 风格</span>
                 </div>
               ) : (
-                images.map((image) => (
-                  <img src={image.url} alt={image.name} key={image.id} />
+                referenceImages.map((image) => (
+                  <figure className="reference-preview-card" key={image.id}>
+                    <img src={image.url} alt={image.name} />
+                    <figcaption>@{image.refName}</figcaption>
+                  </figure>
                 ))
               )}
             </div>
+          </div>
+
+          <div className="scene-limit-panel">
+            <label className="scene-limit-input">
+              <span>场景限制</span>
+              <textarea
+                value={sceneLimit}
+                onChange={(event) => setSceneLimit(event.target.value)}
+                placeholder="限定整个剧本的固定场景、时代、地点、空间规则。"
+                disabled={runLocked}
+              />
+            </label>
+            <div className="scene-limit-upload">
+              <label className="upload-drop compact">
+                <input type="file" accept="image/*" multiple onChange={handleSceneImageUpload} disabled={runLocked} />
+                <UploadCloud size={18} />
+                <span>场景图片 {sceneImages.length}/{MAX_SCENE_IMAGES}</span>
+              </label>
+              <div className="image-preview-row compact">
+                {sceneReferenceImages.length === 0 ? (
+                  <div className="empty-image-slot compact">
+                    <ImagePlus size={18} />
+                    <span>场景参考</span>
+                  </div>
+                ) : (
+                  sceneReferenceImages.map((image) => (
+                    <figure className="reference-preview-card compact" key={image.id}>
+                      <img src={image.url} alt={image.name} />
+                      <figcaption>@{image.refName}</figcaption>
+                    </figure>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="prompt-toggle-grid">
+            <label>
+              <input
+                checked={blockSubtitles}
+                disabled={runLocked}
+                type="checkbox"
+                onChange={(event) => setBlockSubtitles(event.target.checked)}
+              />
+              <span>
+                <strong>强制屏蔽字幕</strong>
+                <small>不要出现任何字幕</small>
+              </span>
+            </label>
+            <label>
+              <input
+                checked={soundEffectOnly}
+                disabled={runLocked}
+                type="checkbox"
+                onChange={toggleSoundEffectOnly}
+              />
+              <span>
+                <strong>仅保留音效</strong>
+                <small>不要背景音乐</small>
+              </span>
+            </label>
+            <label>
+              <input
+                checked={forceMute}
+                disabled={runLocked}
+                type="checkbox"
+                onChange={toggleForceMute}
+              />
+              <span>
+                <strong>强制全部静音</strong>
+                <small>不要有任何声音</small>
+              </span>
+            </label>
           </div>
 
           <div className="control-duo">
@@ -532,17 +1004,25 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
               </div>
               <div className="segmented-control segment-duration-control">
                 {segmentDurationOptions.map((option) => {
+                  const isDivisible = duration % option === 0;
                   const exceedsLimit = Math.ceil(duration / option) > 40;
+                  const optionDisabled = runLocked || !isDivisible || exceedsLimit;
+                  const title = !isDivisible
+                    ? '目标时长不能被该单段时长整除'
+                    : exceedsLimit
+                      ? '该总时长最多支持 40 段，请选择更长的单段时长'
+                      : '';
                   return (
                     <button
                       className={segmentDuration === option ? 'selected' : ''}
                       key={option}
                       onClick={() => setSegmentDuration(option)}
-                      disabled={runLocked || exceedsLimit}
-                      title={exceedsLimit ? '该总时长最多支持 40 段，请选择更长的单段时长' : ''}
+                      disabled={optionDisabled}
+                      title={title}
+                      type="button"
                     >
                       <strong>{option}秒</strong>
-                      <small>{Math.ceil(duration / option)}段</small>
+                      <small>{isDivisible ? `${duration / option}段` : '不可整除'}</small>
                     </button>
                   );
                 })}
@@ -704,6 +1184,48 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
             <div className="progress-track">
               <span style={{ width: `${progress}%` }} />
             </div>
+            <div className="queue-overview" aria-live="polite">
+              <div className="queue-overview-head">
+                <span>
+                  <strong>{queueSummary.label}</strong>
+                  <small>排队进度 {queueSummary.queueProgress}%</small>
+                </span>
+                <em>{queueSummary.done}/{queueSummary.total || 0} 段完成</em>
+              </div>
+              <div className="queue-status-grid">
+                <div>
+                  <strong>{queueSummary.queued}</strong>
+                  <span>排队中</span>
+                </div>
+                <div>
+                  <strong>{queueSummary.active}</strong>
+                  <span>生成中</span>
+                </div>
+                <div>
+                  <strong>{queueSummary.waiting}</strong>
+                  <span>等待中</span>
+                </div>
+              </div>
+              <small className="queue-refresh-note">每分钟自动同步 · 上次 {progressRefreshLabel}</small>
+            </div>
+            {failedScenes.length > 0 ? (
+              <div className="queue-failure-list">
+                {failedScenes.map((scene) => (
+                  <button
+                    disabled={Boolean(retryingSceneId)}
+                    key={scene.id}
+                    type="button"
+                    onClick={() => handleRetryScene(scene)}
+                  >
+                    <AlertTriangle size={14} />
+                    <span>
+                      <strong>{scene.number} {scene.title}</strong>
+                      <small>{scene.error || '即梦生成失败'}{scene.refundCredit ? ` · 已返还 ${scene.refundCredit} 积分` : ''}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <div className="stage-list">
               {agentStages.map((stage, index) => (
                 <div
@@ -786,7 +1308,23 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
             </div>
           ) : (
             scenes.map((scene, index) => (
-              <article className={`scene-card ${isStoryboardReview ? 'editable' : ''}`} key={scene.id}>
+              <article
+                className={[
+                  'scene-card',
+                  isStoryboardReview ? 'editable' : '',
+                  scene.status === 'failed' ? 'retryable' : '',
+                ].filter(Boolean).join(' ')}
+                key={scene.id}
+                role={scene.status === 'failed' ? 'button' : undefined}
+                tabIndex={scene.status === 'failed' ? 0 : undefined}
+                onClick={() => scene.status === 'failed' && handleRetryScene(scene)}
+                onKeyDown={(event) => {
+                  if (scene.status === 'failed' && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault();
+                    handleRetryScene(scene);
+                  }
+                }}
+              >
                 <img
                   className="scene-card-image"
                   src={sceneVisuals[index % sceneVisuals.length]}
@@ -818,12 +1356,31 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                   ) : (
                     <p>{scene.prompt}</p>
                   )}
-                  {scene.error ? <small className="scene-error">{scene.error}</small> : null}
+                  {scene.error ? (
+                    <small className="scene-error">
+                      {scene.error}
+                      {scene.refundCredit ? ` · 已返还 ${scene.refundCredit} 积分` : ''}
+                    </small>
+                  ) : null}
                   <div className="mini-progress">
                     <span style={{ width: `${scene.progress}%` }} />
                   </div>
+                  {scene.status === 'failed' ? (
+                    <button
+                      className="scene-retry-button"
+                      disabled={Boolean(retryingSceneId)}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleRetryScene(scene);
+                      }}
+                    >
+                      {retryingSceneId === scene.id ? <Loader2 className="spin" size={13} /> : <RefreshCw size={13} />}
+                      重新生成该分镜
+                    </button>
+                  ) : null}
                   {scene.videoUrl ? (
-                    <a className="scene-result-link" href={scene.videoUrl} target="_blank" rel="noreferrer">
+                    <a className="scene-result-link" href={scene.videoUrl} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
                       <Play size={13} />
                       查看生成片段
                     </a>
