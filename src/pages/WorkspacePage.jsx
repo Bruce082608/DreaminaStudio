@@ -26,7 +26,7 @@ import {
   Workflow,
   Zap,
 } from 'lucide-react';
-import { apiRequest } from '../api/client';
+import { API_BASE_URL, apiRequest } from '../api/client';
 import { BrandLogo, CreditNavButton, UserIdentityButton } from '../components/AppChrome';
 import {
   calculateCreditCost,
@@ -52,6 +52,7 @@ import { createScenes } from '../utils/workspace';
 
 const MAX_REFERENCE_IMAGES = 9;
 const MAX_SCENE_IMAGES = 9;
+const POLLABLE_RUN_STATUSES = new Set(['queued', 'planning', 'generating']);
 
 function getReferenceLabel(index) {
   return `图片${index + 1}`;
@@ -112,11 +113,67 @@ function formatRefreshTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
+function formatHistoryTime(timestamp) {
+  if (!timestamp) return '未知时间';
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp * 1000));
+}
+
+function getRunStatusLabel(status) {
+  return {
+    queued: '排队中',
+    planning: '编写分镜',
+    awaiting_confirmation: '待确认',
+    generating: '生成中',
+    completed: '已完成',
+    failed: '失败',
+  }[status] || '处理中';
+}
+
+function getRunHistoryTitle(run) {
+  const firstLine = String(run?.idea || '').split('\n').find(Boolean) || '未命名任务';
+  return firstLine.length > 24 ? `${firstLine.slice(0, 24)}...` : firstLine;
+}
+
+function isRunPollable(run) {
+  return POLLABLE_RUN_STATUSES.has(run?.status);
+}
+
+function buildRestoredReferenceImages(run, { sceneReferences = false } = {}) {
+  const ids = sceneReferences ? run.sceneImageIds || [] : run.imageIds || [];
+  const names = sceneReferences ? run.sceneImageNames || [] : run.imageNames || [];
+  const references = sceneReferences ? run.sceneImageReferences || [] : run.imageReferences || [];
+  const fallbackFactory = sceneReferences ? getSceneImageLabel : getReferenceLabel;
+  const referenceById = new Map(references.map((reference) => [reference.id, reference]));
+
+  return ids.slice(0, MAX_REFERENCE_IMAGES).map((uploadId, index) => {
+    const reference = referenceById.get(uploadId);
+    const refName = (reference?.label || '').replace(/^@/, '') || fallbackFactory(index);
+    const name = reference?.name || names[index] || refName;
+    return {
+      id: `restored-${uploadId}`,
+      uploadId,
+      refName,
+      token: `@${refName}`,
+      name,
+      url: '',
+      file: null,
+    };
+  });
+}
+
 export default function WorkspacePage({ auth, billingState, onShowCredits, onShowIntro, onShowAdmin, onShowProfile, onLogout }) {
   const timers = useRef([]);
   const imageUrls = useRef(new Set());
   const ideaTextareaRef = useRef(null);
   const scenesRef = useRef([]);
+  const activeRunIdRef = useRef('');
+  const runStatusRef = useRef('idle');
+  const restoreAgentRunRef = useRef(null);
   const [idea, setIdea] = useState(initialWorkspace.idea);
   const [duration, setDuration] = useState(initialWorkspace.duration);
   const [segmentDuration, setSegmentDuration] = useState(initialWorkspace.segmentDuration);
@@ -141,6 +198,8 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
   const [runStatus, setRunStatus] = useState('idle');
+  const [runHistory, setRunHistory] = useState([]);
+  const [isRestoringRuns, setIsRestoringRuns] = useState(false);
   const [referenceMenu, setReferenceMenu] = useState({
     open: false,
     start: 0,
@@ -153,6 +212,8 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const { billing, refreshBilling } = billingState;
 
   scenesRef.current = scenes;
+  activeRunIdRef.current = activeRunId;
+  runStatusRef.current = runStatus;
 
   const selectedDuration = useMemo(
     () => durationOptions.find((item) => item.value === duration),
@@ -266,6 +327,33 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
       activeImageUrls.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (!auth?.token) return undefined;
+
+    let isMounted = true;
+    setIsRestoringRuns(true);
+
+    apiRequest('/agent/runs?limit=20', { authToken: auth.token })
+      .then(async (runs) => {
+        if (!isMounted) return;
+        setRunHistory(runs);
+        const resumableRun = runs.find((run) => ['queued', 'planning', 'generating', 'awaiting_confirmation'].includes(run.status));
+        if (resumableRun && runStatusRef.current === 'idle' && !activeRunIdRef.current) {
+          await restoreAgentRunRef.current?.(resumableRun, { poll: true });
+        }
+      })
+      .catch((error) => {
+        if (isMounted) setApiError(error.message);
+      })
+      .finally(() => {
+        if (isMounted) setIsRestoringRuns(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [auth?.token]);
 
   useEffect(() => {
     if (!isSegmentDurationAvailable(duration, segmentDuration)) {
@@ -384,6 +472,105 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     }
   }
 
+  function revokeWorkspaceImageUrls() {
+    [...images, ...sceneImages].forEach((image) => {
+      if (image.url && imageUrls.current.has(image.url)) {
+        URL.revokeObjectURL(image.url);
+        imageUrls.current.delete(image.url);
+      }
+    });
+  }
+
+  function upsertRunHistory(run) {
+    setRunHistory((current) => {
+      const merged = [run, ...current.filter((item) => item.id !== run.id)];
+      return merged
+        .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+        .slice(0, 20);
+    });
+  }
+
+  async function fetchUploadObjectUrl(uploadId) {
+    const response = await fetch(`${API_BASE_URL}/agent/uploads/${encodeURIComponent(uploadId)}/content`, {
+      headers: {
+        Authorization: `Bearer ${auth?.token}`,
+      },
+    });
+    if (!response.ok) return '';
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    imageUrls.current.add(objectUrl);
+    return objectUrl;
+  }
+
+  async function hydrateReferenceImageUrls(restoredImages, setter) {
+    if (!auth?.token || restoredImages.length === 0) return;
+    const hydratedImages = await Promise.all(restoredImages.map(async (image) => {
+      if (!image.uploadId || image.url) return image;
+      try {
+        const url = await fetchUploadObjectUrl(image.uploadId);
+        return url ? { ...image, url } : image;
+      } catch {
+        return image;
+      }
+    }));
+    setter((currentImages) => currentImages.map((image) => {
+      const hydrated = hydratedImages.find((item) => item.uploadId === image.uploadId);
+      return hydrated || image;
+    }));
+  }
+
+  async function hydrateRunReferenceImages(restoredImages, restoredSceneImages) {
+    await Promise.all([
+      hydrateReferenceImageUrls(restoredImages, setImages),
+      hydrateReferenceImageUrls(restoredSceneImages, setSceneImages),
+    ]);
+  }
+
+  function applyRunToWorkspace(latestRun) {
+    const restoredImages = buildRestoredReferenceImages(latestRun);
+    const restoredSceneImages = buildRestoredReferenceImages(latestRun, { sceneReferences: true });
+
+    revokeWorkspaceImageUrls();
+    setActiveRunId(latestRun.id);
+    setIdea(latestRun.idea || '');
+    setDuration(latestRun.duration || initialWorkspace.duration);
+    setSegmentDuration(
+      isSegmentDurationAvailable(latestRun.duration, latestRun.segmentDuration)
+        ? latestRun.segmentDuration
+        : getPreferredSegmentDuration(latestRun.duration || initialWorkspace.duration),
+    );
+    setStyle(latestRun.style || initialWorkspace.style);
+    setRatio(latestRun.ratio || initialWorkspace.ratio);
+    setJimengModel(latestRun.jimengModel || initialWorkspace.jimengModel);
+    setImages(restoredImages);
+    setSceneLimit(latestRun.sceneLimit || '');
+    setSceneImages(restoredSceneImages);
+    setBlockSubtitles(latestRun.blockSubtitles !== false);
+    setSoundEffectOnly(Boolean(latestRun.soundEffectOnly));
+    setForceMute(Boolean(latestRun.forceMute));
+    setCandidates(latestRun.candidates || []);
+    setSelectedCandidateId(latestRun.selectedCandidateId || latestRun.candidates?.[0]?.id || '');
+    setFinalVideoUrl(latestRun.finalVideoUrl || '');
+    setIsConfirming(false);
+    closeReferenceMenu();
+    hydrateRunReferenceImages(restoredImages, restoredSceneImages);
+  }
+
+  async function restoreAgentRun(latestRun, { poll = false } = {}) {
+    clearTaskTimers();
+    applyRunToWorkspace(latestRun);
+    const isFinished = syncAgentRun(latestRun);
+    setIsGenerating(isRunPollable(latestRun));
+    setApiError(latestRun.status === 'failed' ? latestRun.error || '任务未能完成，请稍后重试。' : '');
+
+    if (poll && !isFinished) {
+      timers.current = [setTimeout(() => pollAgentRun(latestRun.id), 400)];
+    }
+  }
+
+  restoreAgentRunRef.current = restoreAgentRun;
+
   function syncAgentRun(latestRun) {
     let syncedScenes = latestRun.scenes.length > 0
       ? latestRun.scenes.map((scene) => ({
@@ -401,11 +588,13 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
 
     scenesRef.current = syncedScenes;
     setScenes(syncedScenes);
+    setActiveRunId(latestRun.id);
     setProgress(latestRun.progress ?? 0);
     setRunStatus(latestRun.status);
     setStageIndex(agentStageIndexes[latestRun.stage] ?? 0);
     setApiStatus(`任务状态：${agentStageLabels[latestRun.stage] || latestRun.stage}`);
     setLastProgressRefreshAt(Date.now());
+    upsertRunHistory(latestRun);
 
     if (latestRun.finalVideoUrl) {
       setFinalVideoUrl(latestRun.finalVideoUrl);
@@ -731,6 +920,24 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     }
   }
 
+  async function handleOpenHistoryRun(runId) {
+    if (!runId) return;
+    clearTaskTimers();
+    setIsRestoringRuns(true);
+    setApiError('');
+
+    try {
+      const latestRun = await apiRequest(`/agent/runs/${encodeURIComponent(runId)}`, {
+        authToken: auth?.token,
+      });
+      await restoreAgentRun(latestRun, { poll: true });
+    } catch (error) {
+      setApiError(error.message);
+    } finally {
+      setIsRestoringRuns(false);
+    }
+  }
+
   function resetWorkspace() {
     clearTaskTimers();
     images.forEach((image) => {
@@ -818,7 +1025,31 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
           <div className="rail-section">
             <p className="rail-label">历史</p>
             <div className="project-list">
-              <p className="rail-empty">暂无历史项目</p>
+              {isRestoringRuns && runHistory.length === 0 ? (
+                <p className="rail-empty">正在同步历史任务...</p>
+              ) : runHistory.length === 0 ? (
+                <p className="rail-empty">暂无历史项目</p>
+              ) : (
+                runHistory.map((run) => (
+                  <button
+                    className={[
+                      'project-history-item',
+                      activeRunId === run.id ? 'selected' : '',
+                      isRunPollable(run) ? 'live' : '',
+                    ].filter(Boolean).join(' ')}
+                    key={run.id}
+                    onClick={() => handleOpenHistoryRun(run.id)}
+                    type="button"
+                  >
+                    <span>
+                      <strong>{getRunHistoryTitle(run)}</strong>
+                      <small>{formatHistoryTime(run.updatedAt)}</small>
+                    </span>
+                    <em>{getRunStatusLabel(run.status)}</em>
+                    <b>{run.scenes?.length || Math.ceil((run.duration || 0) / (run.segmentDuration || 1))}段 · {run.creditCost || run.estimatedCreditCost || 0}积分</b>
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </aside>
@@ -853,7 +1084,13 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                     onClick={() => insertReferenceMention(image)}
                     type="button"
                   >
-                    <img src={image.url} alt="" />
+                    {image.url ? (
+                      <img src={image.url} alt="" />
+                    ) : (
+                      <span className="reference-preview-placeholder">
+                        <ImagePlus size={15} />
+                      </span>
+                    )}
                     <span>
                       <strong>@{image.refName}</strong>
                       <small>{image.name}</small>
@@ -879,7 +1116,13 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
               ) : (
                 referenceImages.map((image) => (
                   <figure className="reference-preview-card" key={image.id}>
-                    <img src={image.url} alt={image.name} />
+                    {image.url ? (
+                      <img src={image.url} alt={image.name} />
+                    ) : (
+                      <span className="reference-preview-placeholder">
+                        <ImagePlus size={16} />
+                      </span>
+                    )}
                     <figcaption>@{image.refName}</figcaption>
                   </figure>
                 ))
@@ -912,7 +1155,13 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                 ) : (
                   sceneReferenceImages.map((image) => (
                     <figure className="reference-preview-card compact" key={image.id}>
-                      <img src={image.url} alt={image.name} />
+                      {image.url ? (
+                        <img src={image.url} alt={image.name} />
+                      ) : (
+                        <span className="reference-preview-placeholder">
+                          <ImagePlus size={15} />
+                        </span>
+                      )}
                       <figcaption>@{image.refName}</figcaption>
                     </figure>
                   ))

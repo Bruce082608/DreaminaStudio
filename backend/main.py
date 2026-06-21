@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from pydantic import BaseModel, Field
@@ -336,6 +337,8 @@ def env_flag(name: str, default: str = "false") -> bool:
 DATA_DIR = Path(__file__).resolve().parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
 SETTINGS_FILE = DATA_DIR / "agent_settings.json"
+AGENT_RUNS_FILE = DATA_DIR / "agent_runs.json"
+UPLOADED_REFERENCES_FILE = DATA_DIR / "uploaded_references.json"
 TRANSACTIONS_FILE = DATA_DIR / "credit_transactions.json"
 VERIFICATION_CODES_FILE = DATA_DIR / "verification_codes.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
@@ -764,6 +767,70 @@ def save_agent_settings(settings: AgentSettings) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with SETTINGS_FILE.open("w", encoding="utf-8") as file:
         json.dump(jsonable_encoder(settings), file, ensure_ascii=False, indent=2)
+
+def write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(jsonable_encoder(payload), file, ensure_ascii=False, indent=2)
+    temp_path.replace(path)
+
+def load_agent_runs_from_disk() -> None:
+    if not AGENT_RUNS_FILE.exists():
+        return
+    try:
+        raw_payload = json.loads(AGENT_RUNS_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load persisted Agent runs: %s", exc)
+        return
+
+    raw_runs = raw_payload.values() if isinstance(raw_payload, dict) else raw_payload
+    restored_runs: Dict[str, AgentRun] = {}
+    for raw_run in raw_runs or []:
+        try:
+            run = AgentRun(**raw_run)
+        except Exception as exc:
+            logger.warning("Skipping invalid persisted Agent run: %s", exc)
+            continue
+        restored_runs[run.id] = run
+    agent_runs.update(restored_runs)
+
+def persist_agent_runs() -> None:
+    write_json_file(
+        AGENT_RUNS_FILE,
+        sorted(agent_runs.values(), key=lambda run: run.createdAt, reverse=True),
+    )
+
+def persist_agent_run(run: AgentRun) -> AgentRun:
+    agent_runs[run.id] = run
+    persist_agent_runs()
+    return run
+
+def load_uploaded_references_from_disk() -> None:
+    if not UPLOADED_REFERENCES_FILE.exists():
+        return
+    try:
+        raw_payload = json.loads(UPLOADED_REFERENCES_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load uploaded reference index: %s", exc)
+        return
+
+    raw_references = raw_payload.values() if isinstance(raw_payload, dict) else raw_payload
+    restored_references: Dict[str, UploadedReference] = {}
+    for raw_reference in raw_references or []:
+        try:
+            reference = UploadedReference(**raw_reference)
+        except Exception as exc:
+            logger.warning("Skipping invalid uploaded reference record: %s", exc)
+            continue
+        restored_references[reference.id] = reference
+    uploaded_references.update(restored_references)
+
+def persist_uploaded_references() -> None:
+    write_json_file(
+        UPLOADED_REFERENCES_FILE,
+        sorted(uploaded_references.values(), key=lambda reference: reference.id),
+    )
 
 def normalize_jimeng_model(model: str) -> str:
     normalized = (model or "").strip()
@@ -1232,8 +1299,7 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
             if not completed_scenes:
                 run.error = "所有即梦分镜任务均未成功生成"
     run.updatedAt = time.time()
-    agent_runs[run.id] = run
-    return run
+    return persist_agent_run(run)
 
 def backend_status_to_agent_status(status: str) -> str:
     return {
@@ -1274,7 +1340,7 @@ async def process_agent_run(run_id: str) -> None:
         run.stage = "storyboard_planning" if settings.deepseekApiKey else "local_planning"
         run.progress = 8
         run.updatedAt = time.time()
-        agent_runs[run_id] = run
+        persist_agent_run(run)
 
         candidates, planner_model = await build_scene_plan(payload, run_id, settings)
         run.agentModel = planner_model
@@ -1283,7 +1349,7 @@ async def process_agent_run(run_id: str) -> None:
         run.stage = "awaiting_confirmation"
         run.progress = 20
         run.updatedAt = time.time()
-        agent_runs[run_id] = run
+        persist_agent_run(run)
         logger.info("Agent run %s created %s editable storyboard candidates.", run_id, len(candidates))
     except Exception as exc:
         run.status = "failed"
@@ -1291,7 +1357,7 @@ async def process_agent_run(run_id: str) -> None:
         run.error = str(exc)
         run.progress = 0
         run.updatedAt = time.time()
-        agent_runs[run_id] = run
+        persist_agent_run(run)
         logger.exception("Agent run %s failed: %s", run_id, exc)
 
 def get_run_reference_entries(
@@ -1486,7 +1552,7 @@ async def process_confirmed_run(run_id: str) -> None:
                 progress=0,
                 caption=f"{scene.title} / {run.ratio}",
             )
-        agent_runs[run_id] = run
+        persist_agent_run(run)
 
         for scene in run.scenes:
             await generate_single_scene(run, scene, settings)
@@ -1498,8 +1564,64 @@ async def process_confirmed_run(run_id: str) -> None:
         run.stage = "failed"
         run.error = str(exc)
         run.updatedAt = time.time()
-        agent_runs[run_id] = run
+        persist_agent_run(run)
         logger.exception("Confirmed Agent run %s failed: %s", run_id, exc)
+
+async def resume_confirmed_run(run_id: str) -> None:
+    run = agent_runs.get(run_id)
+    if not run or not run.scenes:
+        return
+
+    pending_statuses = {"queued", "waiting", "generating"}
+    pending_scenes = [
+        scene for scene in run.scenes
+        if scene.status in pending_statuses or (not scene.videoUrl and scene.status not in {"completed", "failed"})
+    ]
+    if not pending_scenes:
+        sync_run_from_shots(run)
+        return
+
+    try:
+        settings = load_agent_settings()
+        run.status = "generating"
+        run.stage = "jimeng_dispatch"
+        run.error = None
+        run.updatedAt = time.time()
+        persist_agent_run(run)
+
+        for scene in pending_scenes:
+            current_run = agent_runs.get(run_id, run)
+            current_scene = next((item for item in current_run.scenes if item.id == scene.id), scene)
+            if current_scene.status in {"completed", "failed"}:
+                continue
+            shots_db[current_scene.id] = Shot(
+                id=current_scene.id,
+                prompt=current_scene.prompt,
+                duration=current_scene.duration,
+                engine="jimeng",
+                status="waiting",
+                progress=current_scene.progress if current_scene.status == "generating" else 0,
+                caption=f"{current_scene.title} / {current_run.ratio}",
+            )
+            await generate_single_scene(current_run, current_scene, settings)
+
+        sync_run_from_shots(agent_runs.get(run_id, run))
+        logger.info("Agent run %s resumed pending scene generation.", run_id)
+    except Exception as exc:
+        run = agent_runs.get(run_id, run)
+        run.status = "failed"
+        run.stage = "failed"
+        run.error = str(exc)
+        run.updatedAt = time.time()
+        persist_agent_run(run)
+        logger.exception("Resumed Agent run %s failed: %s", run_id, exc)
+
+def schedule_persisted_agent_runs() -> None:
+    for run in list(agent_runs.values()):
+        if run.status in {"queued", "planning"} and not run.candidates and not run.scenes:
+            asyncio.create_task(process_agent_run(run.id))
+        elif run.status in {"queued", "generating"} and run.scenes:
+            asyncio.create_task(resume_confirmed_run(run.id))
 
 async def process_scene_retry(run_id: str, scene_id: str) -> None:
     run = agent_runs.get(run_id)
@@ -1525,7 +1647,7 @@ async def process_scene_retry(run_id: str, scene_id: str) -> None:
             progress=0,
             caption=f"{scene.title} / {run.ratio}",
         )
-        agent_runs[run_id] = run
+        persist_agent_run(run)
         await generate_single_scene(run, scene, settings)
         sync_run_from_shots(run)
         logger.info("Agent run %s retried scene %s.", run_id, scene_id)
@@ -1537,7 +1659,7 @@ async def process_scene_retry(run_id: str, scene_id: str) -> None:
             shot.error = str(exc)
         refund_failed_scene_if_needed(run, scene)
         run.updatedAt = time.time()
-        agent_runs[run_id] = run
+        persist_agent_run(run)
         logger.exception("Scene retry %s/%s failed: %s", run_id, scene_id, exc)
 
 # ==========================================
@@ -1671,9 +1793,12 @@ async def startup_event():
     database.init_database()
     database.migrate_json_files(USERS_FILE, TRANSACTIONS_FILE, VERIFICATION_CODES_FILE)
     ensure_default_admin()
+    load_uploaded_references_from_disk()
+    load_agent_runs_from_disk()
     # Start background task queue worker
     worker_task = asyncio.create_task(queue_worker())
     active_workers.append(worker_task)
+    schedule_persisted_agent_runs()
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -2035,7 +2160,20 @@ async def upload_agent_reference(
         path=str(file_path),
     )
     uploaded_references[image_id] = reference
+    persist_uploaded_references()
     return AgentUploadResponse(id=image_id, name=reference.name)
+
+@app.get("/agent/uploads/{image_id}/content")
+def get_agent_upload_content(image_id: str, current_user: UserRecord = Depends(get_current_user)):
+    reference = uploaded_references.get(image_id)
+    if not reference:
+        raise HTTPException(status_code=404, detail="参考图片不存在")
+    if current_user.role != "admin" and reference.userId != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot view this reference image")
+    file_path = Path(reference.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="参考图片文件不存在")
+    return FileResponse(file_path, filename=reference.name)
 
 @app.post("/agent/runs", response_model=AgentRun)
 async def create_agent_run(
@@ -2091,9 +2229,19 @@ async def create_agent_run(
         createdAt=time.time(),
         updatedAt=time.time(),
     )
-    agent_runs[run_id] = run
+    persist_agent_run(run)
     background_tasks.add_task(process_agent_run, run_id)
     return run
+
+@app.get("/agent/runs", response_model=List[AgentRun])
+def list_agent_runs(limit: int = 20, current_user: UserRecord = Depends(get_current_user)):
+    bounded_limit = min(max(limit, 1), 100)
+    visible_runs = [
+        sync_run_from_shots(run)
+        for run in list(agent_runs.values())
+        if current_user.role == "admin" or run.userId == current_user.id
+    ]
+    return sorted(visible_runs, key=lambda item: item.updatedAt, reverse=True)[:bounded_limit]
 
 @app.post("/agent/runs/{run_id}/confirm", response_model=AgentRun)
 async def confirm_agent_run(
@@ -2147,7 +2295,7 @@ async def confirm_agent_run(
     run.stage = "jimeng_dispatch"
     run.progress = 20
     run.updatedAt = time.time()
-    agent_runs[run.id] = run
+    persist_agent_run(run)
     background_tasks.add_task(process_confirmed_run, run.id)
     return run
 
@@ -2208,7 +2356,7 @@ async def retry_agent_scene(
         progress=0,
         caption=f"{scene.title} / {run.ratio}",
     )
-    agent_runs[run.id] = run
+    persist_agent_run(run)
     background_tasks.add_task(process_scene_retry, run.id, scene_id)
     return sync_run_from_shots(run)
 

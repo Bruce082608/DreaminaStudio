@@ -78,12 +78,24 @@ class FakeSmtpClient:
 class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.database_dir = tempfile.TemporaryDirectory()
+        self.storage_dir = tempfile.TemporaryDirectory()
+        storage_path = Path(self.storage_dir.name)
         self.database_patcher = patch.object(
             main.database,
             "DATABASE_URL",
             f"sqlite:///{Path(self.database_dir.name) / 'test.sqlite3'}",
         )
         self.database_patcher.start()
+        self.agent_runs_file_patcher = patch.object(main, "AGENT_RUNS_FILE", storage_path / "agent_runs.json")
+        self.uploaded_references_file_patcher = patch.object(
+            main,
+            "UPLOADED_REFERENCES_FILE",
+            storage_path / "uploaded_references.json",
+        )
+        self.uploads_dir_patcher = patch.object(main, "UPLOADS_DIR", storage_path / "uploads")
+        self.agent_runs_file_patcher.start()
+        self.uploaded_references_file_patcher.start()
+        self.uploads_dir_patcher.start()
         main.database.init_database()
         main.agent_runs.clear()
         main.shots_db.clear()
@@ -91,7 +103,11 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         main.task_queue = asyncio.Queue()
 
     async def asyncTearDown(self):
+        self.uploads_dir_patcher.stop()
+        self.uploaded_references_file_patcher.stop()
+        self.agent_runs_file_patcher.stop()
         self.database_patcher.stop()
+        self.storage_dir.cleanup()
         self.database_dir.cleanup()
 
     async def test_mock_agent_flow_returns_video_result(self):
@@ -159,6 +175,79 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed_run.creditCost, 60)
         self.assertTrue(completed_run.finalVideoUrl)
         self.assertTrue(all(scene.status == "completed" for scene in completed_run.scenes))
+
+    async def test_agent_run_history_survives_memory_reset(self):
+        run = main.AgentRun(
+            id="agent-persisted",
+            userId="user-owner",
+            userEmail="owner@example.com",
+            idea="一条需要长时间生成的影片",
+            duration=30,
+            segmentDuration=10,
+            style="电影感",
+            ratio="16:9",
+            status="generating",
+            stage="jimeng_generating",
+            progress=45,
+            creditCost=60,
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="agent-persisted-scene-1",
+                    number="01",
+                    time="00:00 - 00:10",
+                    title="第一段",
+                    prompt="角色在城市街头奔跑，镜头低角度跟随。",
+                    duration=10,
+                    status="generating",
+                    progress=45,
+                )
+            ],
+        )
+        main.persist_agent_run(run)
+
+        main.agent_runs.clear()
+        main.load_agent_runs_from_disk()
+
+        owner = main.UserRecord(
+            id="user-owner",
+            name="Owner",
+            email="owner@example.com",
+            passwordHash="not-used",
+            createdAt=main.time.time(),
+        )
+        other = main.UserRecord(
+            id="user-other",
+            name="Other",
+            email="other@example.com",
+            passwordHash="not-used",
+            createdAt=main.time.time(),
+        )
+
+        self.assertIn(run.id, main.agent_runs)
+        owner_runs = main.list_agent_runs(20, owner)
+        self.assertEqual([item.id for item in owner_runs], [run.id])
+        self.assertEqual(main.list_agent_runs(20, other), [])
+
+    async def test_uploaded_reference_index_survives_memory_reset(self):
+        reference_path = Path(self.storage_dir.name) / "uploads" / "user-ref" / "ref-1.png"
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        reference_path.write_bytes(b"fake-image")
+        reference = main.UploadedReference(
+            id="ref-1",
+            userId="user-ref",
+            name="人物.png",
+            path=str(reference_path),
+        )
+        main.uploaded_references[reference.id] = reference
+        main.persist_uploaded_references()
+
+        main.uploaded_references.clear()
+        main.load_uploaded_references_from_disk()
+
+        self.assertIn(reference.id, main.uploaded_references)
+        self.assertEqual(main.uploaded_references[reference.id].name, "人物.png")
 
     async def test_storyboard_malformed_json_is_repaired(self):
         payload = main.AgentCreatePayload(

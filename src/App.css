@@ -1920,6 +1920,74 @@
   font-style: normal;
 }
 
+.project-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.65rem;
+  width: 100%;
+  min-height: 4.7rem;
+  padding: 0.72rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.035);
+  color: #dce4ef;
+  text-align: left;
+}
+
+.project-history-item:hover,
+.project-history-item.selected {
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.project-history-item.live em {
+  color: #38bdf8;
+}
+
+.project-history-item span,
+.project-history-item strong,
+.project-history-item small,
+.project-history-item em,
+.project-history-item b {
+  min-width: 0;
+}
+
+.project-history-item strong,
+.project-history-item small {
+  display: block;
+}
+
+.project-history-item strong {
+  overflow: hidden;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-history-item small {
+  margin-top: 0.28rem;
+  color: #7f8da2;
+  font-size: 0.7rem;
+}
+
+.project-history-item em {
+  color: #9ee6b7;
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.project-history-item b {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #7f8da2;
+  font-size: 0.69rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .creation-panel,
 .director-panel,
 .timeline-panel {
@@ -2018,6 +2086,22 @@
   height: 2.25rem;
   border-radius: 0.45rem;
   object-fit: cover;
+}
+
+.reference-preview-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.055);
+  color: #738094;
+}
+
+.reference-mention-menu .reference-preview-placeholder {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.45rem;
 }
 
 .reference-mention-menu strong,
