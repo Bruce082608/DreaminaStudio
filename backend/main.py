@@ -102,6 +102,17 @@ class Shot(BaseModel):
     videoUrl: Optional[str] = None
     caption: Optional[str] = None
     error: Optional[str] = None
+    failureCategory: Optional[str] = None
+    failureTitle: Optional[str] = None
+    failureReason: Optional[str] = None
+    failureDetail: Optional[str] = None
+    failureSubmitId: Optional[str] = None
+    failureLogId: Optional[str] = None
+    jimengSubmitId: Optional[str] = None
+    queuePosition: Optional[int] = None
+    queueTotal: Optional[int] = None
+    queueStatus: Optional[str] = None
+    queueUpdatedAt: Optional[float] = None
 
 class CompileParams(BaseModel):
     bgm: str = "lofi"
@@ -238,6 +249,17 @@ class AgentRunScene(BaseModel):
     progress: int = 0
     videoUrl: Optional[str] = None
     error: Optional[str] = None
+    failureCategory: Optional[str] = None
+    failureTitle: Optional[str] = None
+    failureReason: Optional[str] = None
+    failureDetail: Optional[str] = None
+    failureSubmitId: Optional[str] = None
+    failureLogId: Optional[str] = None
+    jimengSubmitId: Optional[str] = None
+    queuePosition: Optional[int] = None
+    queueTotal: Optional[int] = None
+    queueStatus: Optional[str] = None
+    queueUpdatedAt: Optional[float] = None
     creditRefundedAt: Optional[float] = None
     refundCredit: int = 0
     retryCount: int = 0
@@ -1281,6 +1303,17 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
             scene.progress = shot.progress
             scene.videoUrl = shot.videoUrl
             scene.error = shot.error
+            scene.failureCategory = shot.failureCategory
+            scene.failureTitle = shot.failureTitle
+            scene.failureReason = shot.failureReason
+            scene.failureDetail = shot.failureDetail
+            scene.failureSubmitId = shot.failureSubmitId
+            scene.failureLogId = shot.failureLogId
+            scene.jimengSubmitId = shot.jimengSubmitId
+            scene.queuePosition = shot.queuePosition
+            scene.queueTotal = shot.queueTotal
+            scene.queueStatus = shot.queueStatus
+            scene.queueUpdatedAt = shot.queueUpdatedAt
         synced_scenes.append(scene)
 
     run.scenes = synced_scenes
@@ -1297,7 +1330,11 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
             run.progress = 100 if completed_scenes else run.progress
             run.finalVideoUrl = completed_scenes[0].videoUrl if completed_scenes else None
             if not completed_scenes:
-                run.error = "所有即梦分镜任务均未成功生成"
+                failed_scene = next((scene for scene in run.scenes if scene.status == "failed"), None)
+                if failed_scene and failed_scene.failureTitle:
+                    run.error = f"所有即梦分镜任务均未成功生成；首个失败原因：{failed_scene.failureTitle}"
+                else:
+                    run.error = "所有即梦分镜任务均未成功生成"
     run.updatedAt = time.time()
     return persist_agent_run(run)
 
@@ -1309,6 +1346,48 @@ def backend_status_to_agent_status(status: str) -> str:
         "completed": "completed",
         "failed": "failed",
     }.get(status, status)
+
+def clear_generation_failure(shot: Shot) -> None:
+    shot.error = None
+    shot.failureCategory = None
+    shot.failureTitle = None
+    shot.failureReason = None
+    shot.failureDetail = None
+    shot.failureSubmitId = None
+    shot.failureLogId = None
+
+def clear_generation_queue(shot: Shot) -> None:
+    shot.jimengSubmitId = None
+    shot.queuePosition = None
+    shot.queueTotal = None
+    shot.queueStatus = None
+    shot.queueUpdatedAt = None
+
+def apply_generation_error_to_shot(shot: Shot, exc: Exception) -> None:
+    shot.error = str(exc)
+    shot.failureCategory = getattr(exc, "failure_category", None) or "unknown"
+    shot.failureTitle = getattr(exc, "failure_title", None) or "即梦生成失败"
+    shot.failureReason = getattr(exc, "failure_reason", None)
+    shot.failureDetail = getattr(exc, "failure_detail", None) or str(exc)
+    shot.failureSubmitId = getattr(exc, "failure_submit_id", None)
+    shot.failureLogId = getattr(exc, "failure_log_id", None)
+
+def apply_jimeng_progress_to_shot(shot: Shot, update: Dict[str, Any]) -> None:
+    submit_id = update.get("submitId")
+    if submit_id:
+        shot.jimengSubmitId = str(submit_id)
+
+    queue_info = update.get("queueInfo")
+    if isinstance(queue_info, dict):
+        shot.queuePosition = queue_info.get("position")
+        shot.queueTotal = queue_info.get("total")
+        shot.queueStatus = queue_info.get("status")
+        shot.queueUpdatedAt = time.time()
+
+    status = str(update.get("status") or "").lower()
+    if status in {"querying", "queueing", "queued", "pending", "submitted"}:
+        shot.status = "generating"
+        shot.progress = max(shot.progress, 8)
 
 async def process_agent_run(run_id: str) -> None:
     run = agent_runs.get(run_id)
@@ -1491,7 +1570,8 @@ async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: A
     shot = shots_db[scene.id]
     shot.status = "generating"
     shot.progress = 5
-    shot.error = None
+    clear_generation_failure(shot)
+    clear_generation_queue(shot)
     run.stage = "jimeng_generating"
     run.updatedAt = time.time()
     sync_run_from_shots(run)
@@ -1511,16 +1591,18 @@ async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: A
                 reference_paths=scene_reference_paths,
                 public_root=OUTPUTS_DIR,
                 public_url_prefix="/api/outputs",
+                progress_callback=lambda update: apply_jimeng_progress_to_shot(shot, update),
             )
             shot.videoUrl = result.video_url
             shot.progress = 100
             shot.status = "completed"
+            shot.queueStatus = "Finish"
         else:
             raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
     except (JimengCliError, RuntimeError) as exc:
         shot.status = "failed"
         shot.progress = 0
-        shot.error = str(exc)
+        apply_generation_error_to_shot(shot, exc)
         refund_failed_scene_if_needed(run, scene)
         logger.exception("Jimeng scene %s failed: %s", scene.id, exc)
 
@@ -1656,7 +1738,7 @@ async def process_scene_retry(run_id: str, scene_id: str) -> None:
         if shot:
             shot.status = "failed"
             shot.progress = 0
-            shot.error = str(exc)
+            apply_generation_error_to_shot(shot, exc)
         refund_failed_scene_if_needed(run, scene)
         run.updatedAt = time.time()
         persist_agent_run(run)
@@ -1678,7 +1760,8 @@ async def simulate_video_generation(shot_id: str, cookie_id: Optional[str]):
 
         shot.status = "generating"
         shot.progress = 0
-        shot.error = None
+        clear_generation_failure(shot)
+        clear_generation_queue(shot)
         
         total_steps = 10
         delay_per_step = max(MOCK_GENERATION_STEP_SECONDS, 0.01)
@@ -1713,6 +1796,9 @@ async def simulate_video_generation(shot_id: str, cookie_id: Optional[str]):
                 "hunyuan": "CUDA Out of Memory: GPU VRAM Allocation Error"
             }
             shot.error = errors.get(shot.engine, "未知的网关上游响应异常")
+            shot.failureCategory = "platform"
+            shot.failureTitle = "上游生成服务异常"
+            shot.failureDetail = shot.error
             logger.error(f"Shot {shot_id} failed: {shot.error}")
 
             # Update cookie fail count
@@ -1727,7 +1813,7 @@ async def simulate_video_generation(shot_id: str, cookie_id: Optional[str]):
         logger.error(f"Unexpected error in background generation: {e}")
         if shot_id in shots_db:
             shots_db[shot_id].status = "failed"
-            shots_db[shot_id].error = str(e)
+            apply_generation_error_to_shot(shots_db[shot_id], e)
     finally:
         # Release the active task counter from the cookie
         if cookie_id and cookie_id in cookie_pool:
@@ -2333,6 +2419,17 @@ async def retry_agent_scene(
             "progress": 0,
             "videoUrl": None,
             "error": None,
+            "failureCategory": None,
+            "failureTitle": None,
+            "failureReason": None,
+            "failureDetail": None,
+            "failureSubmitId": None,
+            "failureLogId": None,
+            "jimengSubmitId": None,
+            "queuePosition": None,
+            "queueTotal": None,
+            "queueStatus": None,
+            "queueUpdatedAt": None,
             "creditRefundedAt": None,
             "refundCredit": 0,
             "retryCount": item.retryCount + 1,

@@ -457,6 +457,52 @@ Dreamina CLI
         self.assertEqual(len(parsed), 2)
         self.assertEqual(parsed[1]["submit_id"], "second")
 
+    def test_jimeng_failure_reason_is_human_readable(self):
+        failure = jimeng_cli.describe_generation_failure({
+            "submit_id": "ea77a2f5-b078-486a-afcb-a471cddbc450",
+            "prompt": "强制限制：不要出现任何字幕。这里是一段很长的分镜提示词。",
+            "logid": "202606211643151720180000022650281",
+            "gen_status": "fail",
+            "fail_reason": "api",
+        })
+        message = jimeng_cli.format_generation_failure(failure)
+
+        self.assertEqual(failure.category, "platform")
+        self.assertEqual(failure.reason, "api")
+        self.assertIn("即梦平台接口异常", message)
+        self.assertIn("原因码：api", message)
+        self.assertIn("提交ID：ea77a2f5-b078-486a-afcb-a471cddbc450", message)
+        self.assertNotIn("强制限制", message)
+
+    def test_jimeng_upload_failure_is_classified_separately(self):
+        failure = jimeng_cli.describe_generation_failure({
+            "submit_id": "c707bd90-3b67-46d5-a287-5dbd42619082",
+            "gen_status": "fail",
+            "fail_reason": 'upload resource "/app/data/uploads/user/ref.png": upload image: upload phase, no file upload',
+        })
+
+        self.assertEqual(failure.category, "upload")
+        self.assertEqual(failure.title, "参考素材上传失败")
+
+    def test_jimeng_querying_status_is_active(self):
+        self.assertTrue(jimeng_cli.is_active_generation_status("querying"))
+        self.assertFalse(jimeng_cli.is_failed_generation_status("querying"))
+
+    def test_jimeng_queue_info_is_extracted(self):
+        queue_info = jimeng_cli.extract_queue_info({
+            "submit_id": "queue-test",
+            "gen_status": "querying",
+            "queue_info": {
+                "queue_idx": 1254,
+                "queue_length": 3576,
+                "queue_status": 1,
+            },
+        })
+
+        self.assertEqual(queue_info["position"], 1254)
+        self.assertEqual(queue_info["total"], 3576)
+        self.assertEqual(queue_info["status"], "1")
+
     def test_recharge_and_generation_charge_update_balance(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

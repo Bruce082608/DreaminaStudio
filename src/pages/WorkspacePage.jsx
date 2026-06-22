@@ -46,7 +46,6 @@ import {
   agentStageLabels,
   agentStages,
   initialWorkspace,
-  sceneVisuals,
 } from '../config/workspace';
 import { createScenes } from '../utils/workspace';
 
@@ -139,6 +138,151 @@ function getRunHistoryTitle(run) {
   return firstLine.length > 24 ? `${firstLine.slice(0, 24)}...` : firstLine;
 }
 
+const failureCategoryLabels = {
+  upload: '上传',
+  audit: '审核',
+  platform: '平台',
+  account: '账号',
+  input: '素材',
+  timeout: '超时',
+  unknown: '失败',
+};
+
+const failureCategoryTitles = {
+  upload: '参考素材上传失败',
+  audit: '内容审核未通过',
+  platform: '即梦平台接口异常',
+  account: '即梦账号或额度异常',
+  input: '素材或参数不被接受',
+  timeout: '即梦生成超时',
+  unknown: '即梦生成失败',
+};
+
+const failureCategoryDetails = {
+  upload: '即梦上传参考素材时没有拿到完整上传结果，通常是平台上传通道或网络瞬时异常；系统会复查任务状态，必要时可稍后重试。',
+  audit: '提示词或参考图可能命中了平台审核规则，请调整敏感动作、人物关系、暴力/低俗描述或参考图后重试。',
+  platform: '即梦平台返回接口失败，通常不是分镜本身的问题，可稍后重试。',
+  account: '即梦账号状态、登录态、额度或并发限制可能异常，请检查后台即梦账号状态。',
+  input: '参考图、提示词或生成参数未被即梦接受，请检查图片格式、内容和分镜描述。',
+  timeout: '平台长时间没有返回结果，可能仍在排队或服务繁忙，可稍后重试。',
+  unknown: '即梦返回失败状态，但没有提供更明确的原因。',
+};
+
+function compactFailureText(value, maxLength = 180) {
+  if (value === null || value === undefined) return '';
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}...` : text;
+}
+
+function parseFailurePayload(errorText) {
+  const text = String(errorText || '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function findFailureValue(value, keys) {
+  if (!value) return '';
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFailureValue(item, keys);
+      if (found) return found;
+    }
+    return '';
+  }
+  if (typeof value !== 'object') return '';
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (keys.has(key.toLowerCase()) && nested !== null && nested !== undefined && nested !== '') {
+      return nested;
+    }
+  }
+  for (const nested of Object.values(value)) {
+    const found = findFailureValue(nested, keys);
+    if (found) return found;
+  }
+  return '';
+}
+
+function inferFailureCategory(reason, detail) {
+  const combined = `${reason || ''} ${detail || ''}`.toLowerCase();
+  if (/upload resource|upload image|no file upload|上传素材|上传图片|上传失败/.test(combined)) return 'upload';
+  if (/审核|违规|敏感|sensitive|risk|policy|violation|unsafe/.test(combined)) return 'audit';
+  if (/timeout|timed out|超时|排队|busy|繁忙/.test(combined)) return 'timeout';
+  if (/api|server|internal|service|系统|平台|接口/.test(combined)) return 'platform';
+  if (/quota|credit|balance|rate|login|auth|积分|额度|余额|登录|并发/.test(combined)) return 'account';
+  if (/image|file|format|prompt|param|图片|素材|格式|参数|提示词/.test(combined)) return 'input';
+  return 'unknown';
+}
+
+function getSceneFailureInfo(scene) {
+  const payload = parseFailurePayload(scene?.error);
+  const reason = compactFailureText(
+    scene?.failureReason || findFailureValue(payload, new Set(['fail_reason', 'failreason', 'failure_reason', 'reason_code', 'error_code', 'code'])),
+    80,
+  );
+  const payloadDetail = compactFailureText(findFailureValue(payload, new Set([
+    'fail_message',
+    'fail_msg',
+    'failure_message',
+    'status_msg',
+    'status_message',
+    'message',
+    'msg',
+    'error',
+    'error_msg',
+    'error_message',
+    'detail',
+    'reason',
+    'description',
+  ])));
+  const rawError = compactFailureText(String(scene?.error || '').replace(/^即梦\s*CLI\s*(生成)?失败[:：]\s*/, ''));
+  const category = scene?.failureCategory || inferFailureCategory(reason, scene?.failureDetail || payloadDetail || rawError);
+  const title = scene?.failureTitle || failureCategoryTitles[category] || failureCategoryTitles.unknown;
+  let detail = scene?.failureDetail || payloadDetail;
+
+  if (reason.toLowerCase() === 'api') {
+    detail = '即梦返回 API 失败，通常是平台接口或服务侧异常；如果同一分镜连续失败，再检查提示词和参考图。';
+  } else if (!detail || detail.toLowerCase() === reason.toLowerCase()) {
+    detail = failureCategoryDetails[category] || rawError || failureCategoryDetails.unknown;
+  }
+
+  const submitId = scene?.failureSubmitId || compactFailureText(findFailureValue(payload, new Set(['submit_id', 'submitid', 'task_id', 'taskid'])), 120);
+  const logId = scene?.failureLogId || compactFailureText(findFailureValue(payload, new Set(['logid', 'log_id', 'request_id', 'trace_id'])), 120);
+  const metadata = [
+    reason ? `原因码：${reason}` : '',
+    submitId ? `提交ID：${submitId}` : '',
+    logId ? `日志ID：${logId}` : '',
+  ].filter(Boolean);
+
+  return {
+    category,
+    categoryLabel: failureCategoryLabels[category] || failureCategoryLabels.unknown,
+    title,
+    detail: detail || rawError || failureCategoryDetails.unknown,
+    metadata,
+  };
+}
+
+function getSceneQueueInfo(scene) {
+  const position = Number(scene?.queuePosition || 0);
+  const total = Number(scene?.queueTotal || 0);
+  if (!position || !total) return null;
+
+  const progress = Math.max(0, Math.min(100, Math.round(((total - position) / total) * 100)));
+  return {
+    label: `排队 ${position}/${total}`,
+    progress,
+    status: scene?.queueStatus || '',
+  };
+}
+
 function isRunPollable(run) {
   return POLLABLE_RUN_STATUSES.has(run?.status);
 }
@@ -197,6 +341,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   const [apiStatus, setApiStatus] = useState('正在连接创作服务...');
   const [apiError, setApiError] = useState('');
   const [finalVideoUrl, setFinalVideoUrl] = useState('');
+  const [previewSceneId, setPreviewSceneId] = useState('');
   const [runStatus, setRunStatus] = useState('idle');
   const [runHistory, setRunHistory] = useState([]);
   const [isRestoringRuns, setIsRestoringRuns] = useState(false);
@@ -303,6 +448,18 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     () => scenes.filter((scene) => scene.status === 'failed'),
     [scenes],
   );
+  const queuedSceneInfos = useMemo(
+    () => scenes
+      .map((scene) => ({ scene, queue: getSceneQueueInfo(scene) }))
+      .filter(({ scene, queue }) => queue && ['queued', 'waiting', 'active'].includes(scene.status)),
+    [scenes],
+  );
+  const primaryQueueInfo = queuedSceneInfos[0] || null;
+  const selectedPreviewScene = useMemo(
+    () => scenes.find((scene) => scene.id === previewSceneId && scene.videoUrl),
+    [previewSceneId, scenes],
+  );
+  const previewVideoUrl = selectedPreviewScene?.videoUrl || finalVideoUrl;
   const progressRefreshLabel = formatRefreshTime(lastProgressRefreshAt);
 
   useEffect(() => {
@@ -552,6 +709,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setCandidates(latestRun.candidates || []);
     setSelectedCandidateId(latestRun.selectedCandidateId || latestRun.candidates?.[0]?.id || '');
     setFinalVideoUrl(latestRun.finalVideoUrl || '');
+    setPreviewSceneId('');
     setIsConfirming(false);
     closeReferenceMenu();
     hydrateRunReferenceImages(restoredImages, restoredSceneImages);
@@ -920,6 +1078,12 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     }
   }
 
+  function handlePreviewScene(scene) {
+    if (!scene?.videoUrl) return;
+    setPreviewSceneId(scene.id);
+    setApiStatus(`正在预览：${scene.number} ${scene.title}`);
+  }
+
   async function handleOpenHistoryRun(runId) {
     if (!runId) return;
     clearTaskTimers();
@@ -971,6 +1135,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setProgress(0);
     setApiError('');
     setFinalVideoUrl('');
+    setPreviewSceneId('');
     setRunStatus('idle');
     setApiStatus('创作服务已连接');
     setLastProgressRefreshAt(null);
@@ -1041,12 +1206,14 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                     onClick={() => handleOpenHistoryRun(run.id)}
                     type="button"
                   >
-                    <span>
+                    <span className="project-history-title">
                       <strong>{getRunHistoryTitle(run)}</strong>
                       <small>{formatHistoryTime(run.updatedAt)}</small>
                     </span>
-                    <em>{getRunStatusLabel(run.status)}</em>
-                    <b>{run.scenes?.length || Math.ceil((run.duration || 0) / (run.segmentDuration || 1))}段 · {run.creditCost || run.estimatedCreditCost || 0}积分</b>
+                    <span className="project-history-meta">
+                      <em>{getRunStatusLabel(run.status)}</em>
+                      <b>{run.scenes?.length || Math.ceil((run.duration || 0) / (run.segmentDuration || 1))}段 · {run.creditCost || run.estimatedCreditCost || 0}积分</b>
+                    </span>
                   </button>
                 ))
               )}
@@ -1388,20 +1555,20 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
               <small>{ratio} / {selectedDuration?.label} / {selectedJimengModel.shortLabel}</small>
             </div>
             <div className="video-preview">
-              {finalVideoUrl ? (
-                <video className="preview-image preview-video" src={finalVideoUrl} controls playsInline />
+              {previewVideoUrl ? (
+                <video className="preview-image preview-video" src={previewVideoUrl} controls playsInline />
               ) : (
                 <div className="preview-empty-state">
                   <Play size={24} />
                   <strong>暂无预览</strong>
                 </div>
               )}
-              {finalVideoUrl ? <div className="video-shine" /> : null}
-              {finalVideoUrl || scenes.length > 0 || isGenerating || runStatus === 'awaiting_confirmation' ? (
+              {previewVideoUrl ? <div className="video-shine" /> : null}
+              {previewVideoUrl || scenes.length > 0 || isGenerating || runStatus === 'awaiting_confirmation' ? (
                 <div className="preview-caption">
                   <strong>
-                    {finalVideoUrl
-                      ? '首段视频预览'
+                    {previewVideoUrl
+                      ? selectedPreviewScene ? `${selectedPreviewScene.number} ${selectedPreviewScene.title}` : '首段视频预览'
                       : runStatus === 'awaiting_confirmation'
                         ? '等待确认分镜'
                         : isGenerating ? '任务处理中' : '等待最新任务'}
@@ -1411,7 +1578,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
               ) : null}
             </div>
             <div className="export-row">
-              <button onClick={() => finalVideoUrl && window.open(finalVideoUrl, '_blank')} disabled={!finalVideoUrl}>
+              <button onClick={() => previewVideoUrl && window.open(previewVideoUrl, '_blank')} disabled={!previewVideoUrl}>
                 <Download size={16} />
                 下载 MP4
               </button>
@@ -1455,24 +1622,45 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                   <span>等待中</span>
                 </div>
               </div>
+              {primaryQueueInfo ? (
+                <div className="queue-position-card">
+                  <span>
+                    <strong>{primaryQueueInfo.scene.number} {primaryQueueInfo.scene.title}</strong>
+                    <small>{primaryQueueInfo.queue.label}</small>
+                  </span>
+                  <em>{primaryQueueInfo.queue.progress}%</em>
+                </div>
+              ) : null}
               <small className="queue-refresh-note">每分钟自动同步 · 上次 {progressRefreshLabel}</small>
             </div>
             {failedScenes.length > 0 ? (
               <div className="queue-failure-list">
-                {failedScenes.map((scene) => (
-                  <button
-                    disabled={Boolean(retryingSceneId)}
-                    key={scene.id}
-                    type="button"
-                    onClick={() => handleRetryScene(scene)}
-                  >
-                    <AlertTriangle size={14} />
-                    <span>
-                      <strong>{scene.number} {scene.title}</strong>
-                      <small>{scene.error || '即梦生成失败'}{scene.refundCredit ? ` · 已返还 ${scene.refundCredit} 积分` : ''}</small>
-                    </span>
-                  </button>
-                ))}
+                {failedScenes.map((scene) => {
+                  const failure = getSceneFailureInfo(scene);
+                  const metadata = [
+                    ...failure.metadata,
+                    scene.refundCredit ? `已返还 ${scene.refundCredit} 积分` : '',
+                  ].filter(Boolean);
+
+                  return (
+                    <button
+                      disabled={Boolean(retryingSceneId)}
+                      key={scene.id}
+                      type="button"
+                      onClick={() => handleRetryScene(scene)}
+                    >
+                      <AlertTriangle size={14} />
+                      <span>
+                        <strong>{scene.number} {scene.title}</strong>
+                        <small>
+                          <b>{failure.title}</b>
+                          <span>{failure.detail}</span>
+                          {metadata.length > 0 ? <em>{metadata.join(' · ')}</em> : null}
+                        </small>
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
             <div className="stage-list">
@@ -1562,24 +1750,24 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                   'scene-card',
                   isStoryboardReview ? 'editable' : '',
                   scene.status === 'failed' ? 'retryable' : '',
+                  scene.videoUrl ? 'has-video' : '',
+                  previewSceneId === scene.id ? 'selected-preview' : '',
                 ].filter(Boolean).join(' ')}
                 key={scene.id}
-                role={scene.status === 'failed' ? 'button' : undefined}
-                tabIndex={scene.status === 'failed' ? 0 : undefined}
-                onClick={() => scene.status === 'failed' && handleRetryScene(scene)}
+                role={scene.status === 'failed' || scene.videoUrl ? 'button' : undefined}
+                tabIndex={scene.status === 'failed' || scene.videoUrl ? 0 : undefined}
+                onClick={() => {
+                  if (scene.status === 'failed') handleRetryScene(scene);
+                  else handlePreviewScene(scene);
+                }}
                 onKeyDown={(event) => {
-                  if (scene.status === 'failed' && (event.key === 'Enter' || event.key === ' ')) {
+                  if ((scene.status === 'failed' || scene.videoUrl) && (event.key === 'Enter' || event.key === ' ')) {
                     event.preventDefault();
-                    handleRetryScene(scene);
+                    if (scene.status === 'failed') handleRetryScene(scene);
+                    else handlePreviewScene(scene);
                   }
                 }}
               >
-                <img
-                  className="scene-card-image"
-                  src={sceneVisuals[index % sceneVisuals.length]}
-                  alt=""
-                  loading="lazy"
-                />
                 <div className="scene-index">{scene.number}</div>
                 <div className="scene-main">
                   <div className="scene-title-row">
@@ -1605,12 +1793,37 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                   ) : (
                     <p>{scene.prompt}</p>
                   )}
-                  {scene.error ? (
-                    <small className="scene-error">
-                      {scene.error}
-                      {scene.refundCredit ? ` · 已返还 ${scene.refundCredit} 积分` : ''}
-                    </small>
-                  ) : null}
+                  {['queued', 'waiting', 'active'].includes(scene.status) && getSceneQueueInfo(scene) ? (() => {
+                    const queue = getSceneQueueInfo(scene);
+                    return (
+                      <div className="scene-queue-info">
+                        <span>
+                          <Clock3 size={13} />
+                          {queue.label}
+                        </span>
+                        <em>{queue.progress}%</em>
+                      </div>
+                    );
+                  })() : null}
+                  {scene.error || scene.failureTitle || scene.failureDetail ? (() => {
+                    const failure = getSceneFailureInfo(scene);
+                    const metadata = [
+                      ...failure.metadata,
+                      scene.refundCredit ? `已返还 ${scene.refundCredit} 积分` : '',
+                    ].filter(Boolean);
+
+                    return (
+                      <div className="scene-error">
+                        <span className="scene-error-head">
+                          <AlertTriangle size={13} />
+                          <strong>{failure.title}</strong>
+                          <em>{failure.categoryLabel}</em>
+                        </span>
+                        <p>{failure.detail}</p>
+                        {metadata.length > 0 ? <small>{metadata.join(' · ')}</small> : null}
+                      </div>
+                    );
+                  })() : null}
                   <div className="mini-progress">
                     <span style={{ width: `${scene.progress}%` }} />
                   </div>
@@ -1629,10 +1842,17 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                     </button>
                   ) : null}
                   {scene.videoUrl ? (
-                    <a className="scene-result-link" href={scene.videoUrl} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                    <button
+                      className="scene-result-link"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handlePreviewScene(scene);
+                      }}
+                    >
                       <Play size={13} />
-                      查看生成片段
-                    </a>
+                      当前页预览
+                    </button>
                   ) : null}
                 </div>
                 <div className="scene-time">
