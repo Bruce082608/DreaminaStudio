@@ -12,6 +12,8 @@ services:
     environment:
       ENV: production
       DREAMINA_DATABASE_URL: sqlite:////app/data/dreamina_studio.sqlite3
+      DREAMINA_CLI_ACCOUNT_MAX_CONCURRENT: ${DREAMINA_CLI_ACCOUNT_MAX_CONCURRENT:-2}
+      DREAMINA_CLI_PARALLEL_MODELS: ${DREAMINA_CLI_PARALLEL_MODELS:-seedance2.0_vip,seedance2.0fast_vip}
     volumes:
       - ${DREAMINA_DATA_DIR:-/var/lib/dreamina_studio/backend-data}:/app/data
       - ${DREAMINA_CLI_HOME_DIR:-/var/lib/dreamina_studio/cli-home}:/root

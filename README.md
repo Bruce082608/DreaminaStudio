@@ -177,7 +177,28 @@ DREAMINA_CLI_ACCOUNTS='[
 ]'
 ```
 
-Each `home` path stores one account's OAuth login/cache. The backend scheduler leases one available account slot per video task, skips accounts that still have active Jimeng tasks, and waits when the whole pool is busy. Keep `maxConcurrent` at `1` unless Jimeng explicitly allows more concurrent tasks for that account.
+Each `home` path stores one account's OAuth login/cache. The backend scheduler leases one available account slot per video task and uses a local FIFO queue so users see their queue position when all slots are busy. By default it does not treat old `dreamina list_task` `querying` entries as hard locks, because stale upstream tasks can otherwise block the whole site forever. If the official CLI returns `ExceedConcurrencyLimit`, the account is temporarily marked as remotely busy and the waiting task is put back into the pool queue.
+
+Keep `maxConcurrent` at `1` for models that do not support same-account parallel submit. Raise it only for accounts/models you have verified can submit concurrently; the backend will still back off if Dreamina rejects a submit with an upstream concurrency limit.
+
+Optional tuning:
+
+```bash
+# Single-login default in docker-compose is 2 so verified VIP models can overlap.
+DREAMINA_CLI_ACCOUNT_MAX_CONCURRENT=2
+
+# Only these models may use same-account parallel submit slots by default.
+DREAMINA_CLI_PARALLEL_MODELS=seedance2.0_vip,seedance2.0fast_vip
+
+# Re-enable the old pre-submit list_task active-task gate when you know upstream statuses are reliable.
+DREAMINA_CLI_CHECK_REMOTE_ACTIVE_TASKS=true
+
+# How long to wait before retrying after Dreamina returns ExceedConcurrencyLimit.
+DREAMINA_CLI_REMOTE_BUSY_RETRY_SECONDS=45
+
+# Fail and refund a submitted task that stays at querying with no queue info or files.
+DREAMINA_CLI_STALE_QUERYING_TIMEOUT_SECONDS=900
+```
 
 Log in each account separately:
 

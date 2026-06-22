@@ -107,6 +107,8 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         jimeng_cli._account_pool_waiters.clear()
         jimeng_cli._account_pool_condition = None
         jimeng_cli._account_pool_condition_loop = None
+        jimeng_cli._account_pool_remote_busy_until.clear()
+        jimeng_cli._account_pool_remote_saturated.clear()
 
     async def asyncTearDown(self):
         self.uploads_dir_patcher.stop()
@@ -602,6 +604,117 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
                 third_lease = await asyncio.wait_for(third_task, timeout=2)
                 third_lease.release()
 
+    async def test_remote_querying_tasks_do_not_block_account_pool_by_default(self):
+        async def stale_remote_tasks(command, account, output_dir, **_kwargs):
+            return [{"submit_id": "old-stuck", "gen_status": "querying"}]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_home = Path(temp_dir) / "vip-1"
+            output_dir = Path(temp_dir) / "outputs"
+            account_config = json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": str(account_home),
+                    "maxConcurrent": 1,
+                }
+            ], ensure_ascii=False)
+
+            with (
+                patch.dict(jimeng_cli.os.environ, {
+                    "DREAMINA_CLI_ACCOUNTS": account_config,
+                    "DREAMINA_CLI_CHECK_REMOTE_ACTIVE_TASKS": "false",
+                }),
+                patch.object(jimeng_cli, "get_active_generation_tasks", stale_remote_tasks),
+            ):
+                lease = await jimeng_cli.acquire_account_lease(["dreamina"], 1, output_dir)
+                lease.release()
+
+    async def test_remote_active_task_check_can_be_enabled(self):
+        async def stale_remote_tasks(command, account, output_dir, **_kwargs):
+            return [{"submit_id": "old-stuck", "gen_status": "querying"}]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_home = Path(temp_dir) / "vip-1"
+            output_dir = Path(temp_dir) / "outputs"
+            account_config = json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": str(account_home),
+                    "maxConcurrent": 1,
+                }
+            ], ensure_ascii=False)
+
+            with (
+                patch.dict(jimeng_cli.os.environ, {
+                    "DREAMINA_CLI_ACCOUNTS": account_config,
+                    "DREAMINA_CLI_CHECK_REMOTE_ACTIVE_TASKS": "true",
+                }),
+                patch.object(jimeng_cli, "get_active_generation_tasks", stale_remote_tasks),
+            ):
+                with self.assertRaises(jimeng_cli.JimengCliError) as raised:
+                    await jimeng_cli.acquire_account_lease(["dreamina"], 1, output_dir)
+
+        self.assertEqual(getattr(raised.exception, "failure_reason", None), "account_pool_busy")
+
+    async def test_account_pool_waits_when_remote_concurrency_is_saturated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_home = Path(temp_dir) / "vip-1"
+            output_dir = Path(temp_dir) / "outputs"
+            account_config = json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": str(account_home),
+                    "maxConcurrent": 2,
+                }
+            ], ensure_ascii=False)
+
+            with (
+                patch.dict(jimeng_cli.os.environ, {"DREAMINA_CLI_ACCOUNTS": account_config}),
+                patch.object(jimeng_cli, "DREAMINA_CLI_REMOTE_BUSY_RETRY_SECONDS", 10),
+            ):
+                first_lease = await jimeng_cli.acquire_account_lease(["dreamina"], 1, output_dir)
+                jimeng_cli.mark_account_remote_saturated(first_lease.account)
+
+                with self.assertRaises(jimeng_cli.JimengCliError):
+                    await jimeng_cli.acquire_account_lease(["dreamina"], 1, output_dir)
+
+                first_lease.release()
+                jimeng_cli._account_pool_remote_busy_until.clear()
+                second_lease = await jimeng_cli.acquire_account_lease(["dreamina"], 1, output_dir)
+                second_lease.release()
+
+    async def test_non_parallel_model_waits_even_when_account_has_extra_slots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_home = Path(temp_dir) / "vip-1"
+            output_dir = Path(temp_dir) / "outputs"
+            account_config = json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": str(account_home),
+                    "maxConcurrent": 2,
+                }
+            ], ensure_ascii=False)
+
+            with patch.dict(jimeng_cli.os.environ, {"DREAMINA_CLI_ACCOUNTS": account_config}):
+                first_lease = await jimeng_cli.acquire_account_lease(
+                    ["dreamina"],
+                    1,
+                    output_dir,
+                    parallel_submit_allowed=False,
+                )
+                with self.assertRaises(jimeng_cli.JimengCliError):
+                    await jimeng_cli.acquire_account_lease(
+                        ["dreamina"],
+                        1,
+                        output_dir,
+                        parallel_submit_allowed=False,
+                    )
+                first_lease.release()
+
     async def test_agent_run_history_survives_memory_reset(self):
         run = main.AgentRun(
             id="agent-persisted",
@@ -910,6 +1023,22 @@ Dreamina CLI
         self.assertEqual(failure.category, "upload")
         self.assertEqual(failure.title, "参考素材上传失败")
 
+    def test_jimeng_concurrency_failure_is_classified_as_account(self):
+        failure = jimeng_cli.describe_generation_failure({
+            "submit_id": "ea77a2f5-b078-486a-afcb-a471cddbc450",
+            "gen_status": "fail",
+            "fail_reason": "api error: ret=1310, message=ExceedConcurrencyLimit, logid=abc",
+        })
+
+        self.assertEqual(failure.category, "account")
+        self.assertTrue(jimeng_cli.is_account_concurrency_error(
+            jimeng_cli.JimengCliError(
+                "即梦 CLI 命令失败：api error: ret=1310, message=ExceedConcurrencyLimit",
+                failure_category="account",
+                failure_reason="concurrency",
+            )
+        ))
+
     def test_jimeng_querying_status_is_active(self):
         self.assertTrue(jimeng_cli.is_active_generation_status("querying"))
         self.assertFalse(jimeng_cli.is_failed_generation_status("querying"))
@@ -952,6 +1081,13 @@ Dreamina CLI
         self.assertEqual(accounts[0].alias, "高级号1")
         self.assertEqual(str(accounts[1].home_dir), "/tmp/dreamina-vip-2")
         self.assertEqual(accounts[1].max_concurrent, 2)
+
+    def test_default_parallel_submit_models_are_vip_only(self):
+        with patch.dict(jimeng_cli.os.environ, {}, clear=True):
+            self.assertTrue(jimeng_cli.model_allows_parallel_submit("seedance2.0_vip"))
+            self.assertTrue(jimeng_cli.model_allows_parallel_submit("seedance2.0fast_vip"))
+            self.assertFalse(jimeng_cli.model_allows_parallel_submit("seedance2.0fast"))
+            self.assertFalse(jimeng_cli.model_allows_parallel_submit("seedance2.0mini"))
 
     def test_recharge_and_generation_charge_update_balance(self):
         with tempfile.TemporaryDirectory() as temp_dir:

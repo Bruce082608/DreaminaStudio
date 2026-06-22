@@ -69,6 +69,7 @@ class JimengAccountLease:
             return
         self.released = True
         self.semaphore.release()
+        maybe_clear_account_remote_saturation(self.account, self.semaphore)
         wake_account_pool_waiters()
 
 
@@ -134,7 +135,10 @@ FAILURE_REASON_CATEGORIES = {
     "balance": "account",
     "insufficient_credit": "account",
     "rate_limited": "account",
+    "rate_limit": "account",
     "concurrency": "account",
+    "exceedconcurrencylimit": "account",
+    "exceed_concurrency_limit": "account",
     "login": "account",
     "auth": "account",
     "image": "input",
@@ -165,13 +169,25 @@ SUCCESS_GENERATION_STATUSES = {"success", "done", "completed"}
 FAILED_GENERATION_STATUSES = {"fail", "failed", "error"}
 DREAMINA_CLI_POLL_INTERVAL_SECONDS = float(os.getenv("DREAMINA_CLI_POLL_INTERVAL_SECONDS", "20"))
 DREAMINA_CLI_SLOT_CHECK_INTERVAL_SECONDS = float(os.getenv("DREAMINA_CLI_SLOT_CHECK_INTERVAL_SECONDS", "30"))
+DREAMINA_CLI_REMOTE_BUSY_RETRY_SECONDS = float(os.getenv("DREAMINA_CLI_REMOTE_BUSY_RETRY_SECONDS", "45"))
+DREAMINA_CLI_STALE_QUERYING_TIMEOUT_SECONDS = float(os.getenv("DREAMINA_CLI_STALE_QUERYING_TIMEOUT_SECONDS", "900"))
 DEFAULT_ACCOUNT_ID = "default"
+DEFAULT_PARALLEL_SUBMIT_MODELS = {"seedance2.0_vip", "seedance2.0fast_vip"}
 _account_pool_semaphores: Dict[str, asyncio.Semaphore] = {}
 _account_pool_limits: Dict[str, int] = {}
 _account_pool_next_index = 0
 _account_pool_waiters: list[AccountPoolWaiter] = []
 _account_pool_condition: Optional[asyncio.Condition] = None
 _account_pool_condition_loop: Optional[asyncio.AbstractEventLoop] = None
+_account_pool_remote_busy_until: Dict[str, float] = {}
+_account_pool_remote_saturated: set[str] = set()
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def compact_failure_text(value: Any, max_length: int = 180) -> str:
@@ -214,11 +230,25 @@ def infer_failure_category(reason: str, detail: str) -> str:
         return "upload"
     if any(token in combined for token in ("审核", "违规", "敏感", "sensitive", "risk", "policy", "violation", "unsafe")):
         return "audit"
+    if any(token in combined for token in (
+        "exceedconcurrencylimit",
+        "exceed concurrency",
+        "concurrency",
+        "rate_limited",
+        "rate limit",
+        "too many",
+        "并发",
+        "频率",
+        "额度",
+        "余额",
+        "登录",
+    )):
+        return "account"
     if any(token in combined for token in ("timeout", "timed out", "超时", "排队", "busy", "繁忙")):
         return "timeout"
     if any(token in combined for token in ("api", "server", "internal", "service", "系统", "平台", "接口")):
         return "platform"
-    if any(token in combined for token in ("quota", "credit", "balance", "rate", "login", "auth", "积分", "额度", "余额", "登录", "并发")):
+    if any(token in combined for token in ("quota", "credit", "balance", "rate", "login", "auth", "积分")):
         return "account"
     if any(token in combined for token in ("image", "file", "format", "prompt", "param", "图片", "素材", "格式", "参数", "提示词")):
         return "input"
@@ -293,12 +323,79 @@ def account_pool_signature(account: JimengAccountSlot) -> str:
     return f"{account.id}:{account.home_dir}:{account.max_concurrent}"
 
 
+def should_check_remote_active_tasks() -> bool:
+    return env_flag("DREAMINA_CLI_CHECK_REMOTE_ACTIVE_TASKS", False)
+
+
+def get_account_active_lease_count(account: JimengAccountSlot, semaphore: Optional[asyncio.Semaphore] = None) -> int:
+    if semaphore is None:
+        semaphore = _account_pool_semaphores.get(account_pool_signature(account))
+    available = getattr(semaphore, "_value", account.max_concurrent) if semaphore else account.max_concurrent
+    return max(account.max_concurrent - int(available), 0)
+
+
+def get_account_remote_busy_seconds(account: JimengAccountSlot) -> float:
+    signature = account_pool_signature(account)
+    busy_until = _account_pool_remote_busy_until.get(signature, 0)
+    remaining = max(busy_until - time.monotonic(), 0)
+    if remaining <= 0:
+        _account_pool_remote_busy_until.pop(signature, None)
+    return remaining
+
+
+def is_account_remote_blocked(account: JimengAccountSlot, semaphore: Optional[asyncio.Semaphore] = None) -> bool:
+    signature = account_pool_signature(account)
+    if get_account_remote_busy_seconds(account) > 0:
+        return True
+
+    active_leases = get_account_active_lease_count(account, semaphore)
+    if signature in _account_pool_remote_saturated and active_leases > 0:
+        return True
+
+    if active_leases <= 0:
+        _account_pool_remote_saturated.discard(signature)
+    return False
+
+
+def mark_account_remote_saturated(account: JimengAccountSlot) -> None:
+    signature = account_pool_signature(account)
+    _account_pool_remote_saturated.add(signature)
+    _account_pool_remote_busy_until[signature] = max(
+        _account_pool_remote_busy_until.get(signature, 0),
+        time.monotonic() + max(DREAMINA_CLI_REMOTE_BUSY_RETRY_SECONDS, 1),
+    )
+    wake_account_pool_waiters()
+
+
+def maybe_clear_account_remote_saturation(
+    account: JimengAccountSlot,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> None:
+    if get_account_active_lease_count(account, semaphore) <= 0 and get_account_remote_busy_seconds(account) <= 0:
+        _account_pool_remote_saturated.discard(account_pool_signature(account))
+
+
 def normalize_account_id(value: str, fallback: str) -> str:
     normalized = "".join(
         character if character.isalnum() or character in {"-", "_"} else "-"
         for character in (value or "").strip().lower()
     ).strip("-")
     return normalized or fallback
+
+
+def get_parallel_submit_models() -> set[str]:
+    raw_models = os.getenv("DREAMINA_CLI_PARALLEL_MODELS")
+    if raw_models is None:
+        return set(DEFAULT_PARALLEL_SUBMIT_MODELS)
+    return {
+        normalize_model_version(part.strip())
+        for part in raw_models.split(",")
+        if part.strip()
+    }
+
+
+def model_allows_parallel_submit(model: str) -> bool:
+    return normalize_model_version(model) in get_parallel_submit_models()
 
 
 def coerce_positive_int(value: Any, fallback: int = 1) -> int:
@@ -387,6 +484,8 @@ def get_account_pool() -> list[JimengAccountSlot]:
         if signature not in active_signatures:
             _account_pool_semaphores.pop(signature, None)
             _account_pool_limits.pop(signature, None)
+            _account_pool_remote_busy_until.pop(signature, None)
+            _account_pool_remote_saturated.discard(signature)
 
     return accounts
 
@@ -397,13 +496,17 @@ def get_account_runtime_snapshot() -> list[Dict[str, Any]]:
         signature = account_pool_signature(account)
         semaphore = _account_pool_semaphores.get(signature)
         available = getattr(semaphore, "_value", account.max_concurrent) if semaphore else account.max_concurrent
+        remote_busy_seconds = get_account_remote_busy_seconds(account)
+        active_leases = max(account.max_concurrent - int(available), 0)
         snapshots.append({
             "id": account.id,
             "alias": account.alias,
             "homeDir": str(account.home_dir),
             "maxConcurrent": account.max_concurrent,
-            "activeLeases": max(account.max_concurrent - int(available), 0),
+            "activeLeases": active_leases,
             "availableLeases": max(int(available), 0),
+            "remoteSaturated": signature in _account_pool_remote_saturated and active_leases > 0,
+            "remoteBusySeconds": round(remote_busy_seconds, 1),
             "tokenExists": (account.home_dir / ".local" / "share" / "dreamina" / "byted_cli_user_token.json").is_file(),
         })
     return snapshots
@@ -412,15 +515,19 @@ def get_account_runtime_snapshot() -> list[Dict[str, Any]]:
 def get_account_pool_capacity_snapshot() -> Dict[str, int]:
     capacity = 0
     active = 0
+    remote_busy = 0
     for account in get_account_pool():
         signature = account_pool_signature(account)
         semaphore = _account_pool_semaphores.get(signature)
         available = getattr(semaphore, "_value", account.max_concurrent) if semaphore else account.max_concurrent
         capacity += account.max_concurrent
         active += max(account.max_concurrent - int(available), 0)
+        if is_account_remote_blocked(account, semaphore):
+            remote_busy += 1
     return {
         "active": active,
         "capacity": capacity,
+        "remoteBusyAccounts": remote_busy,
     }
 
 
@@ -468,6 +575,7 @@ def build_account_pool_queue_info(waiter: AccountPoolWaiter) -> Dict[str, Any]:
         "ahead": max(position - 1, 0),
         "active": capacity_snapshot["active"],
         "capacity": capacity_snapshot["capacity"],
+        "remoteBusyAccounts": capacity_snapshot["remoteBusyAccounts"],
     }
 
 
@@ -533,6 +641,52 @@ def format_generation_failure(details: JimengFailureDetails) -> str:
     if metadata:
         message = f"{message}（{'，'.join(metadata)}）"
     return message
+
+
+def describe_cli_command_failure(detail: str) -> JimengFailureDetails:
+    normalized_detail = compact_failure_text(detail, max_length=500)
+    category = infer_failure_category("", normalized_detail)
+    title, default_detail = FAILURE_CATEGORY_META[category]
+    detail_text = normalized_detail or default_detail
+    reason = None
+    lowered = detail_text.lower().replace("-", "_").replace(" ", "_")
+    if "exceedconcurrencylimit" in lowered or "exceed_concurrency" in lowered or "concurrency" in lowered or "并发" in detail_text:
+        reason = "concurrency"
+    elif "aigccomplianceconfirmationrequired" in lowered:
+        reason = "AigcComplianceConfirmationRequired"
+        category = "account"
+        title, default_detail = FAILURE_CATEGORY_META[category]
+        detail_text = "即梦 Web 端可能需要先完成模型授权确认，再回到本站重试。"
+    elif "insufficient" in lowered or "余额" in detail_text or "积分" in detail_text:
+        reason = "insufficient_credit"
+    elif "auth" in lowered or "login" in lowered or "登录" in detail_text:
+        reason = "auth"
+
+    return JimengFailureDetails(
+        category=category,
+        title=title,
+        detail=detail_text or default_detail,
+        reason=reason,
+    )
+
+
+def is_account_concurrency_error(exc: Exception) -> bool:
+    combined = " ".join(
+        str(part)
+        for part in (
+            str(exc),
+            getattr(exc, "failure_category", None),
+            getattr(exc, "failure_reason", None),
+            getattr(exc, "failure_detail", None),
+        )
+        if part
+    ).lower()
+    return any(token in combined for token in (
+        "exceedconcurrencylimit",
+        "exceed_concurrency",
+        "concurrency",
+        "并发",
+    ))
 
 
 def resolve_dreamina_command() -> Optional[list[str]]:
@@ -604,6 +758,7 @@ def cli_public_status() -> dict[str, Any]:
         "tokenPoolConfigured": token_count > 0,
         "tokenCount": token_count,
         "accountPool": account_pool,
+        "parallelSubmitModels": sorted(get_parallel_submit_models()),
         "accountPoolError": account_pool_error,
     }
 
@@ -785,7 +940,14 @@ async def run_cli_json(
     if process.returncode != 0:
         message = (stderr_text or stdout_text).strip().splitlines()
         detail = message[-1] if message else "未知错误"
-        raise JimengCliError(f"即梦 CLI 命令失败：{detail[:400]}")
+        failure = describe_cli_command_failure(detail)
+        raise JimengCliError(
+            f"即梦 CLI 命令失败：{detail[:400]}",
+            failure_category=failure.category,
+            failure_title=failure.title,
+            failure_reason=failure.reason,
+            failure_detail=failure.detail,
+        )
 
     return parse_json_value(stdout_text)
 
@@ -990,6 +1152,7 @@ async def get_active_generation_tasks(
 async def try_acquire_account_lease_once(
     command: list[str],
     output_dir: Path,
+    parallel_submit_allowed: bool = True,
     cancellation_check: Optional[Callable[[], None]] = None,
 ) -> tuple[Optional[JimengAccountLease], list[str], list[str]]:
     global _account_pool_next_index
@@ -1009,12 +1172,26 @@ async def try_acquire_account_lease_once(
         check_cancellation(cancellation_check)
         signature = account_pool_signature(account)
         semaphore = _account_pool_semaphores[signature]
+        active_lease_count = get_account_active_lease_count(account, semaphore)
+        if not parallel_submit_allowed and active_lease_count > 0:
+            last_errors.append(f"{account.alias}: 当前模型按单账号串行提交，等待前序任务完成")
+            continue
         if getattr(semaphore, "_value", 0) <= 0:
+            continue
+        if is_account_remote_blocked(account, semaphore):
+            remaining = get_account_remote_busy_seconds(account)
+            if remaining > 0:
+                last_errors.append(f"{account.alias}: 即梦上游并发通道繁忙，约 {int(remaining)} 秒后重试")
+            else:
+                last_errors.append(f"{account.alias}: 即梦上游并发通道已满，等待当前任务完成")
             continue
 
         await semaphore.acquire()
         lease = JimengAccountLease(account=account, semaphore=semaphore)
         _account_pool_next_index = (accounts.index(account) + 1) % len(accounts)
+
+        if not should_check_remote_active_tasks():
+            return lease, last_active_ids, last_errors
 
         try:
             active_tasks = await get_active_generation_tasks(
@@ -1076,6 +1253,7 @@ async def acquire_account_lease(
     command: list[str],
     timeout_seconds: int,
     output_dir: Path,
+    parallel_submit_allowed: bool = True,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     cancellation_check: Optional[Callable[[], None]] = None,
 ) -> JimengAccountLease:
@@ -1110,6 +1288,7 @@ async def acquire_account_lease(
             lease, active_ids, errors = await try_acquire_account_lease_once(
                 command,
                 output_dir,
+                parallel_submit_allowed=parallel_submit_allowed,
                 cancellation_check=cancellation_check,
             )
             last_active_ids = active_ids or last_active_ids
@@ -1155,6 +1334,7 @@ async def poll_dreamina_result(
     deadline = time.monotonic() + max(timeout_seconds, 1)
     latest_result = initial_result
     latest_files: list[str] = []
+    detail_less_querying_since: Optional[float] = None
 
     while True:
         check_cancellation(cancellation_check)
@@ -1200,6 +1380,22 @@ async def poll_dreamina_result(
                 failure_submit_id=failure.submit_id,
                 failure_log_id=failure.log_id,
             )
+
+        if status == "querying" and not queue_info and not files:
+            now = time.monotonic()
+            if detail_less_querying_since is None:
+                detail_less_querying_since = now
+            elif now - detail_less_querying_since >= max(DREAMINA_CLI_STALE_QUERYING_TIMEOUT_SECONDS, 60):
+                raise JimengCliError(
+                    "即梦任务长时间停留在 querying，且没有返回队列位置或结果文件",
+                    failure_category="timeout",
+                    failure_title="即梦任务查询无进展",
+                    failure_reason="stale_querying",
+                    failure_detail="即梦平台持续返回查询中，但没有提供排队数字、失败原因或结果文件；系统已停止等待并返还该分镜积分。",
+                    failure_submit_id=submit_id,
+                )
+        else:
+            detail_less_querying_since = None
 
         if status and not is_active_generation_status(status) and not is_success_generation_status(status):
             raise JimengCliError(
@@ -1306,109 +1502,133 @@ async def generate_video_with_dreamina(
             "0",
         ]
 
-    lease = await acquire_account_lease(
-        command,
-        timeout_seconds,
-        output_dir,
-        progress_callback=progress_callback,
-        cancellation_check=cancellation_check,
-    )
-    account = lease.account
-
-    try:
-        check_cancellation(cancellation_check)
-        emit_progress(progress_callback, {
-            "submitId": None,
-            "status": "account_acquired",
-            "queueInfo": None,
-            "accountId": account.id,
-            "accountAlias": account.alias,
-        })
-        result = await run_cli_json(
-            arguments,
-            timeout_seconds=300,
-            cli_home=account.home_dir,
+    submit_deadline = time.monotonic() + max(timeout_seconds, 1)
+    while True:
+        remaining_timeout = max(int(submit_deadline - time.monotonic()), 1)
+        lease: Optional[JimengAccountLease] = await acquire_account_lease(
+            command,
+            remaining_timeout,
+            output_dir,
+            parallel_submit_allowed=model_allows_parallel_submit(model_version),
+            progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )
-        submit_id = find_submit_id(result)
-        status = find_generation_status(result)
-        emit_progress(progress_callback, {
-            "submitId": submit_id,
-            "status": status,
-            "queueInfo": extract_queue_info(result),
-            "accountId": account.id,
-            "accountAlias": account.alias,
-        })
-        video_url = result_to_video_url(result, output_dir, public_root, public_url_prefix)
-        files = collect_files(result)
+        account = lease.account
 
-        if submit_id and not video_url:
+        try:
+            check_cancellation(cancellation_check)
+            emit_progress(progress_callback, {
+                "submitId": None,
+                "status": "account_acquired",
+                "queueInfo": None,
+                "accountId": account.id,
+                "accountAlias": account.alias,
+            })
             try:
-                query_result = await query_dreamina_result(
-                    command,
-                    submit_id,
-                    output_dir,
+                result = await run_cli_json(
+                    arguments,
+                    timeout_seconds=300,
                     cli_home=account.home_dir,
                     cancellation_check=cancellation_check,
                 )
-                query_status = find_generation_status(query_result)
-                if is_active_generation_status(query_status) or is_success_generation_status(query_status):
-                    return await poll_dreamina_result(
-                        command=command,
-                        account=account,
-                        submit_id=submit_id,
-                        output_dir=output_dir,
-                        public_root=public_root,
-                        public_url_prefix=public_url_prefix,
-                        timeout_seconds=timeout_seconds,
-                        initial_result=query_result,
-                        progress_callback=progress_callback,
+            except JimengCliError as exc:
+                if is_account_concurrency_error(exc) and time.monotonic() < submit_deadline:
+                    mark_account_remote_saturated(account)
+                    lease.release()
+                    lease = None
+                    continue
+                raise
+
+            submit_id = find_submit_id(result)
+            status = find_generation_status(result)
+            emit_progress(progress_callback, {
+                "submitId": submit_id,
+                "status": status,
+                "queueInfo": extract_queue_info(result),
+                "accountId": account.id,
+                "accountAlias": account.alias,
+            })
+            video_url = result_to_video_url(result, output_dir, public_root, public_url_prefix)
+            files = collect_files(result)
+
+            if submit_id and not video_url:
+                try:
+                    query_result = await query_dreamina_result(
+                        command,
+                        submit_id,
+                        output_dir,
+                        cli_home=account.home_dir,
                         cancellation_check=cancellation_check,
                     )
-                result = query_result
-                status = query_status
-                video_url = result_to_video_url(result, output_dir, public_root, public_url_prefix)
-                files = collect_files(result) or files
-            except JimengCliError:
-                if not is_failed_generation_status(status):
-                    raise
+                    query_status = find_generation_status(query_result)
+                    if is_active_generation_status(query_status) or is_success_generation_status(query_status):
+                        return await poll_dreamina_result(
+                            command=command,
+                            account=account,
+                            submit_id=submit_id,
+                            output_dir=output_dir,
+                            public_root=public_root,
+                            public_url_prefix=public_url_prefix,
+                            timeout_seconds=timeout_seconds,
+                            initial_result=query_result,
+                            progress_callback=progress_callback,
+                            cancellation_check=cancellation_check,
+                        )
+                    result = query_result
+                    status = query_status
+                    video_url = result_to_video_url(result, output_dir, public_root, public_url_prefix)
+                    files = collect_files(result) or files
+                except JimengCliError:
+                    if not is_failed_generation_status(status):
+                        raise
 
-        if submit_id and (is_active_generation_status(status) or is_success_generation_status(status)):
-            return await poll_dreamina_result(
-                command=command,
-                account=account,
-                submit_id=submit_id,
-                output_dir=output_dir,
-                public_root=public_root,
-                public_url_prefix=public_url_prefix,
-                timeout_seconds=timeout_seconds,
-                initial_result=result,
-                progress_callback=progress_callback,
-                cancellation_check=cancellation_check,
+            if submit_id and (is_active_generation_status(status) or is_success_generation_status(status)):
+                return await poll_dreamina_result(
+                    command=command,
+                    account=account,
+                    submit_id=submit_id,
+                    output_dir=output_dir,
+                    public_root=public_root,
+                    public_url_prefix=public_url_prefix,
+                    timeout_seconds=timeout_seconds,
+                    initial_result=result,
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                )
+
+            if is_failed_generation_status(status):
+                failure = describe_generation_failure(result)
+                if failure.category == "account" and is_account_concurrency_error(JimengCliError(
+                    format_generation_failure(failure),
+                    failure_category=failure.category,
+                    failure_reason=failure.reason,
+                    failure_detail=failure.detail,
+                )) and time.monotonic() < submit_deadline:
+                    mark_account_remote_saturated(account)
+                    lease.release()
+                    lease = None
+                    continue
+                raise JimengCliError(
+                    format_generation_failure(failure),
+                    failure_category=failure.category,
+                    failure_title=failure.title,
+                    failure_reason=failure.reason,
+                    failure_detail=failure.detail,
+                    failure_submit_id=failure.submit_id,
+                    failure_log_id=failure.log_id,
+                )
+            if not video_url:
+                raise JimengCliError("即梦 CLI 已结束，但结果中没有视频地址或本地下载文件")
+
+            return JimengCliResult(
+                video_url=video_url,
+                files=files,
+                account_id=account.id,
+                account_alias=account.alias,
             )
-
-        if is_failed_generation_status(status):
-            failure = describe_generation_failure(result)
-            raise JimengCliError(
-                format_generation_failure(failure),
-                failure_category=failure.category,
-                failure_title=failure.title,
-                failure_reason=failure.reason,
-                failure_detail=failure.detail,
-                failure_submit_id=failure.submit_id,
-                failure_log_id=failure.log_id,
-            )
-        if not video_url:
-            raise JimengCliError("即梦 CLI 已结束，但结果中没有视频地址或本地下载文件")
-
-        return JimengCliResult(
-            video_url=video_url,
-            files=files,
-            account_id=account.id,
-            account_alias=account.alias,
-        )
-    finally:
-        lease.release()
+        finally:
+            if lease:
+                lease.release()
 
 
 async def generate_video(
