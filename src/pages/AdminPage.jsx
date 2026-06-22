@@ -28,6 +28,7 @@ import {
   Users,
   WandSparkles,
   Workflow,
+  XCircle,
   Zap,
 } from 'lucide-react';
 import { API_BASE_URL, apiRequest } from '../api/client';
@@ -59,6 +60,7 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
   const [rechargeRequests, setRechargeRequests] = useState([]);
   const [reviewingRequestId, setReviewingRequestId] = useState('');
   const [selectedRechargeCredits, setSelectedRechargeCredits] = useState({});
+  const [cancelingRunId, setCancelingRunId] = useState('');
   const [agentForm, setAgentForm] = useState({
     deepseekBaseUrl: 'https://api.deepseek.com',
     deepseekModel: 'deepseek-v4-flash',
@@ -240,6 +242,30 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
       setError(requestError.message);
     } finally {
       setReviewingRequestId('');
+    }
+  }
+
+  async function handleCancelAgentRun(run) {
+    if (!run?.id || cancelingRunId) return;
+    const confirmed = window.confirm(`强制取消任务 ${run.id}？未完成分镜会自动返还积分。`);
+    if (!confirmed) return;
+    setCancelingRunId(run.id);
+    setError('');
+    setAgentMessage('正在取消任务...');
+
+    try {
+      await apiRequest(`/admin/agent/runs/${encodeURIComponent(run.id)}/cancel`, {
+        method: 'POST',
+        authToken: auth?.token,
+      });
+      setAgentMessage('任务已取消');
+      await refreshAdminData();
+      await billingState?.refreshBilling?.();
+    } catch (requestError) {
+      setAgentMessage('');
+      setError(requestError.message);
+    } finally {
+      setCancelingRunId('');
     }
   }
 
@@ -577,17 +603,31 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
                   {(agentStatus?.recentRuns || []).length === 0 ? (
                     <p>还没有创作运行记录。</p>
                   ) : (
-                    agentStatus.recentRuns.map((run) => (
-                      <article className="agent-run-item" key={run.id}>
-                        <div>
-                          <strong>{run.idea}</strong>
-                          <small>{run.userEmail || '未知账号'} / {getJimengModelOption(run.jimengModel).shortLabel}</small>
-                        </div>
-                        <span className={`status-pill ${run.status === 'failed' ? 'failed' : run.status === 'completed' ? 'done' : 'active'}`}>
-                          {run.status}
-                        </span>
-                      </article>
-                    ))
+                    agentStatus.recentRuns.map((run) => {
+                      const isCancelableRun = !['completed', 'failed', 'canceled'].includes(run.status);
+                      return (
+                        <article className="agent-run-item" key={run.id}>
+                          <div>
+                            <strong>{run.idea}</strong>
+                            <small>{run.userEmail || '未知账号'} / {getJimengModelOption(run.jimengModel).shortLabel}</small>
+                          </div>
+                          <span className={`status-pill ${run.status === 'failed' ? 'failed' : run.status === 'completed' ? 'done' : run.status === 'canceled' ? 'canceled' : 'active'}`}>
+                            {run.status}
+                          </span>
+                          {isCancelableRun ? (
+                            <button
+                              className="agent-run-cancel-button"
+                              disabled={cancelingRunId === run.id}
+                              onClick={() => handleCancelAgentRun(run)}
+                              type="button"
+                            >
+                              {cancelingRunId === run.id ? <Loader2 className="spin" size={13} /> : <XCircle size={13} />}
+                              取消
+                            </button>
+                          ) : null}
+                        </article>
+                      );
+                    })
                   )}
                 </div>
               </div>

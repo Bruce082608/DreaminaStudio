@@ -24,6 +24,7 @@ import {
   UploadCloud,
   WandSparkles,
   Workflow,
+  XCircle,
   Zap,
 } from 'lucide-react';
 import { API_BASE_URL, apiRequest } from '../api/client';
@@ -52,6 +53,7 @@ import { createScenes } from '../utils/workspace';
 const MAX_REFERENCE_IMAGES = 9;
 const MAX_SCENE_IMAGES = 9;
 const POLLABLE_RUN_STATUSES = new Set(['queued', 'planning', 'generating']);
+const TERMINAL_RUN_STATUSES = new Set(['awaiting_confirmation', 'completed', 'failed', 'canceled']);
 
 function getReferenceLabel(index) {
   return `图片${index + 1}`;
@@ -94,6 +96,7 @@ function mapAgentSceneStatus(status) {
     failed: 'failed',
     waiting: 'waiting',
     queued: 'queued',
+    canceled: 'canceled',
   }[status] || 'queued';
 }
 
@@ -130,6 +133,7 @@ function getRunStatusLabel(status) {
     generating: '生成中',
     completed: '已完成',
     failed: '失败',
+    canceled: '已取消',
   }[status] || '处理中';
 }
 
@@ -376,6 +380,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
   });
   const [lastProgressRefreshAt, setLastProgressRefreshAt] = useState(null);
   const [retryingSceneId, setRetryingSceneId] = useState('');
+  const [isCancellingRun, setIsCancellingRun] = useState(false);
   const { billing, refreshBilling } = billingState;
 
   scenesRef.current = scenes;
@@ -477,6 +482,9 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     [scenes],
   );
   const primaryQueueInfo = queuedSceneInfos[0] || null;
+  const canCancelCurrentRun = Boolean(activeRunId)
+    && ['queued', 'planning', 'generating'].includes(runStatus)
+    && scenes.every((scene) => !scene.jimengSubmitId && !scene.videoUrl && scene.status !== 'done');
   const selectedPreviewScene = useMemo(
     () => scenes.find((scene) => scene.id === previewSceneId && scene.videoUrl),
     [previewSceneId, scenes],
@@ -784,7 +792,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
       setApiError(latestRun.error || '任务未能完成，请稍后重试。');
     }
 
-    return ['awaiting_confirmation', 'completed', 'failed'].includes(latestRun.status);
+    return TERMINAL_RUN_STATUSES.has(latestRun.status);
   }
 
   async function pollAgentRun(runId) {
@@ -1100,6 +1108,32 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     }
   }
 
+  async function handleCancelCurrentRun() {
+    if (!activeRunId || isCancellingRun || !canCancelCurrentRun) return;
+    const confirmed = window.confirm('取消当前排队任务？未开始生成的分镜积分会自动退还。');
+    if (!confirmed) return;
+
+    setIsCancellingRun(true);
+    setApiError('');
+
+    try {
+      const canceledRun = await apiRequest(`/agent/runs/${encodeURIComponent(activeRunId)}/cancel`, {
+        method: 'POST',
+        authToken: auth?.token,
+      });
+      clearTaskTimers();
+      syncAgentRun(canceledRun);
+      setIsGenerating(false);
+      setApiStatus('任务已取消');
+      setApiError(canceledRun.error || '任务已取消，未开始分镜积分已退还。');
+      await refreshBilling();
+    } catch (error) {
+      setApiError(error.message);
+    } finally {
+      setIsCancellingRun(false);
+    }
+  }
+
   function handlePreviewScene(scene) {
     if (!scene?.videoUrl) return;
     setPreviewSceneId(scene.id);
@@ -1162,6 +1196,7 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
     setApiStatus('创作服务已连接');
     setLastProgressRefreshAt(null);
     setRetryingSceneId('');
+    setIsCancellingRun(false);
     closeReferenceMenu();
   }
 
@@ -1656,6 +1691,17 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                   </span>
                   <em>{primaryQueueInfo.queue.progress}%</em>
                 </div>
+              ) : null}
+              {canCancelCurrentRun ? (
+                <button
+                  className="queue-cancel-button"
+                  disabled={isCancellingRun}
+                  onClick={handleCancelCurrentRun}
+                  type="button"
+                >
+                  {isCancellingRun ? <Loader2 className="spin" size={14} /> : <XCircle size={14} />}
+                  {isCancellingRun ? '正在取消' : '取消排队任务'}
+                </button>
               ) : null}
               <small className="queue-refresh-note">每分钟自动同步 · 上次 {progressRefreshLabel}</small>
             </div>

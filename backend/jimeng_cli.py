@@ -284,6 +284,11 @@ def emit_progress(progress_callback: Optional[Callable[[Dict[str, Any]], None]],
         return
 
 
+def check_cancellation(cancellation_check: Optional[Callable[[], None]]) -> None:
+    if cancellation_check:
+        cancellation_check()
+
+
 def account_pool_signature(account: JimengAccountSlot) -> str:
     return f"{account.id}:{account.home_dir}:{account.max_concurrent}"
 
@@ -735,7 +740,13 @@ def normalize_model_version(model: str) -> str:
     return aliases.get(normalized, normalized or "seedance2.0fast")
 
 
-async def run_cli_json(command: list[str], timeout_seconds: int = 120, cli_home: Optional[Path] = None) -> Any:
+async def run_cli_json(
+    command: list[str],
+    timeout_seconds: int = 120,
+    cli_home: Optional[Path] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
+) -> Any:
+    check_cancellation(cancellation_check)
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -746,12 +757,28 @@ async def run_cli_json(command: list[str], timeout_seconds: int = 120, cli_home:
         creationflags=creation_flags,
     )
 
+    communicate_task = asyncio.create_task(process.communicate())
+    deadline = time.monotonic() + max(timeout_seconds, 1)
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        while True:
+            check_cancellation(cancellation_check)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({communicate_task}, timeout=min(1.0, remaining))
+            if done:
+                stdout, stderr = communicate_task.result()
+                break
     except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.communicate()
+        if process.returncode is None:
+            process.kill()
+        await communicate_task
         raise JimengCliError("即梦 CLI 命令超时") from exc
+    except Exception:
+        if process.returncode is None:
+            process.kill()
+        await communicate_task
+        raise
 
     stdout_text = stdout.decode("utf-8", errors="replace")
     stderr_text = stderr.decode("utf-8", errors="replace")
@@ -882,26 +909,56 @@ def result_to_video_url(result: Any, output_dir: Path, public_root: Optional[Pat
     return None
 
 
-async def query_dreamina_result(command: list[str], submit_id: str, output_dir: Path, cli_home: Optional[Path] = None) -> Any:
+async def query_dreamina_result(
+    command: list[str],
+    submit_id: str,
+    output_dir: Path,
+    cli_home: Optional[Path] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
+) -> Any:
     return await run_cli_json(
         [*command, "query_result", f"--submit_id={submit_id}", "--download_dir", str(output_dir.resolve())],
         timeout_seconds=180,
         cli_home=cli_home,
+        cancellation_check=cancellation_check,
     )
 
 
-async def refresh_active_task_status(command: list[str], submit_id: str, output_dir: Path, cli_home: Optional[Path] = None) -> Optional[str]:
+async def refresh_active_task_status(
+    command: list[str],
+    submit_id: str,
+    output_dir: Path,
+    cli_home: Optional[Path] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
+) -> Optional[str]:
     try:
-        result = await query_dreamina_result(command, submit_id, output_dir, cli_home=cli_home)
+        result = await query_dreamina_result(
+            command,
+            submit_id,
+            output_dir,
+            cli_home=cli_home,
+            cancellation_check=cancellation_check,
+        )
     except JimengCliError:
         return None
     return find_generation_status(result)
 
 
-async def get_active_generation_tasks(command: list[str], account: JimengAccountSlot, output_dir: Path) -> list[dict[str, Any]]:
+async def get_active_generation_tasks(
+    command: list[str],
+    account: JimengAccountSlot,
+    output_dir: Path,
+    cancellation_check: Optional[Callable[[], None]] = None,
+) -> list[dict[str, Any]]:
+    check_cancellation(cancellation_check)
     check_dir = output_dir / "_slot_checks" / account.id
     check_dir.mkdir(parents=True, exist_ok=True)
-    tasks = await run_cli_json([*command, "list_task", "--limit=20"], timeout_seconds=90, cli_home=account.home_dir)
+    tasks = await run_cli_json(
+        [*command, "list_task", "--limit=20"],
+        timeout_seconds=90,
+        cli_home=account.home_dir,
+        cancellation_check=cancellation_check,
+    )
     active_tasks = [
         task for task in tasks
         if isinstance(task, dict) and is_active_generation_status(str(task.get("gen_status") or task.get("status") or ""))
@@ -910,9 +967,20 @@ async def get_active_generation_tasks(command: list[str], account: JimengAccount
     for task in active_tasks[:3]:
         submit_id = task.get("submit_id") or task.get("submitId") or task.get("task_id") or task.get("taskId")
         if submit_id:
-            await refresh_active_task_status(command, str(submit_id), check_dir, cli_home=account.home_dir)
+            await refresh_active_task_status(
+                command,
+                str(submit_id),
+                check_dir,
+                cli_home=account.home_dir,
+                cancellation_check=cancellation_check,
+            )
 
-    tasks = await run_cli_json([*command, "list_task", "--limit=20"], timeout_seconds=90, cli_home=account.home_dir)
+    tasks = await run_cli_json(
+        [*command, "list_task", "--limit=20"],
+        timeout_seconds=90,
+        cli_home=account.home_dir,
+        cancellation_check=cancellation_check,
+    )
     return [
         task for task in tasks
         if isinstance(task, dict) and is_active_generation_status(str(task.get("gen_status") or task.get("status") or ""))
@@ -922,9 +990,11 @@ async def get_active_generation_tasks(command: list[str], account: JimengAccount
 async def try_acquire_account_lease_once(
     command: list[str],
     output_dir: Path,
+    cancellation_check: Optional[Callable[[], None]] = None,
 ) -> tuple[Optional[JimengAccountLease], list[str], list[str]]:
     global _account_pool_next_index
 
+    check_cancellation(cancellation_check)
     last_active_ids: list[str] = []
     last_errors: list[str] = []
 
@@ -936,6 +1006,7 @@ async def try_acquire_account_lease_once(
     ordered_accounts = accounts[start_index:] + accounts[:start_index]
 
     for account in ordered_accounts:
+        check_cancellation(cancellation_check)
         signature = account_pool_signature(account)
         semaphore = _account_pool_semaphores[signature]
         if getattr(semaphore, "_value", 0) <= 0:
@@ -946,7 +1017,12 @@ async def try_acquire_account_lease_once(
         _account_pool_next_index = (accounts.index(account) + 1) % len(accounts)
 
         try:
-            active_tasks = await get_active_generation_tasks(command, account, output_dir)
+            active_tasks = await get_active_generation_tasks(
+                command,
+                account,
+                output_dir,
+                cancellation_check=cancellation_check,
+            )
         except JimengCliError as exc:
             lease.release()
             last_errors.append(f"{account.alias}: {exc}")
@@ -978,7 +1054,12 @@ def raise_account_pool_busy(last_active_ids: list[str], last_errors: list[str]) 
     )
 
 
-async def wait_for_account_pool_signal(condition: asyncio.Condition, deadline: float) -> None:
+async def wait_for_account_pool_signal(
+    condition: asyncio.Condition,
+    deadline: float,
+    cancellation_check: Optional[Callable[[], None]] = None,
+) -> None:
+    check_cancellation(cancellation_check)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return
@@ -987,6 +1068,8 @@ async def wait_for_account_pool_signal(condition: asyncio.Condition, deadline: f
         await asyncio.wait_for(condition.wait(), timeout=wait_seconds)
     except asyncio.TimeoutError:
         return
+    finally:
+        check_cancellation(cancellation_check)
 
 
 async def acquire_account_lease(
@@ -994,7 +1077,9 @@ async def acquire_account_lease(
     timeout_seconds: int,
     output_dir: Path,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
 ) -> JimengAccountLease:
+    check_cancellation(cancellation_check)
     deadline = time.monotonic() + max(timeout_seconds, 1)
     last_active_ids: list[str] = []
     last_errors: list[str] = []
@@ -1007,6 +1092,7 @@ async def acquire_account_lease(
 
     try:
         while True:
+            check_cancellation(cancellation_check)
             async with condition:
                 if waiter not in _account_pool_waiters:
                     _account_pool_waiters.append(waiter)
@@ -1015,13 +1101,17 @@ async def acquire_account_lease(
                 if not is_first:
                     if time.monotonic() >= deadline:
                         raise_account_pool_busy(last_active_ids, last_errors)
-                    await wait_for_account_pool_signal(condition, deadline)
+                    await wait_for_account_pool_signal(condition, deadline, cancellation_check=cancellation_check)
                     continue
 
             if time.monotonic() >= deadline:
                 raise_account_pool_busy(last_active_ids, last_errors)
 
-            lease, active_ids, errors = await try_acquire_account_lease_once(command, output_dir)
+            lease, active_ids, errors = await try_acquire_account_lease_once(
+                command,
+                output_dir,
+                cancellation_check=cancellation_check,
+            )
             last_active_ids = active_ids or last_active_ids
             last_errors = errors or last_errors
             if lease:
@@ -1037,7 +1127,7 @@ async def acquire_account_lease(
                 emit_account_pool_queue_progress(progress_callback, waiter)
                 if time.monotonic() >= deadline:
                     raise_account_pool_busy(last_active_ids, last_errors)
-                await wait_for_account_pool_signal(condition, deadline)
+                await wait_for_account_pool_signal(condition, deadline, cancellation_check=cancellation_check)
     finally:
         async with condition:
             original_count = len(_account_pool_waiters)
@@ -1060,14 +1150,22 @@ async def poll_dreamina_result(
     timeout_seconds: int,
     initial_result: Any = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
 ) -> JimengCliResult:
     deadline = time.monotonic() + max(timeout_seconds, 1)
     latest_result = initial_result
     latest_files: list[str] = []
 
     while True:
+        check_cancellation(cancellation_check)
         if latest_result is None:
-            latest_result = await query_dreamina_result(command, submit_id, output_dir, cli_home=account.home_dir)
+            latest_result = await query_dreamina_result(
+                command,
+                submit_id,
+                output_dir,
+                cli_home=account.home_dir,
+                cancellation_check=cancellation_check,
+            )
 
         status = find_generation_status(latest_result)
         queue_info = extract_queue_info(latest_result)
@@ -1133,8 +1231,18 @@ async def poll_dreamina_result(
                 failure_submit_id=submit_id,
             )
 
-        await asyncio.sleep(max(DREAMINA_CLI_POLL_INTERVAL_SECONDS, 5))
-        latest_result = await query_dreamina_result(command, submit_id, output_dir, cli_home=account.home_dir)
+        poll_sleep_seconds = max(DREAMINA_CLI_POLL_INTERVAL_SECONDS, 5)
+        sleep_deadline = time.monotonic() + poll_sleep_seconds
+        while time.monotonic() < sleep_deadline:
+            check_cancellation(cancellation_check)
+            await asyncio.sleep(min(1.0, max(sleep_deadline - time.monotonic(), 0)))
+        latest_result = await query_dreamina_result(
+            command,
+            submit_id,
+            output_dir,
+            cli_home=account.home_dir,
+            cancellation_check=cancellation_check,
+        )
 
 
 async def generate_video_with_dreamina(
@@ -1149,7 +1257,9 @@ async def generate_video_with_dreamina(
     public_url_prefix: str,
     timeout_seconds: int,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
 ) -> JimengCliResult:
+    check_cancellation(cancellation_check)
     command = resolve_dreamina_command()
     if not command:
         raise JimengCliError("未找到官方 dreamina CLI")
@@ -1201,10 +1311,12 @@ async def generate_video_with_dreamina(
         timeout_seconds,
         output_dir,
         progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
     )
     account = lease.account
 
     try:
+        check_cancellation(cancellation_check)
         emit_progress(progress_callback, {
             "submitId": None,
             "status": "account_acquired",
@@ -1212,7 +1324,12 @@ async def generate_video_with_dreamina(
             "accountId": account.id,
             "accountAlias": account.alias,
         })
-        result = await run_cli_json(arguments, timeout_seconds=300, cli_home=account.home_dir)
+        result = await run_cli_json(
+            arguments,
+            timeout_seconds=300,
+            cli_home=account.home_dir,
+            cancellation_check=cancellation_check,
+        )
         submit_id = find_submit_id(result)
         status = find_generation_status(result)
         emit_progress(progress_callback, {
@@ -1227,7 +1344,13 @@ async def generate_video_with_dreamina(
 
         if submit_id and not video_url:
             try:
-                query_result = await query_dreamina_result(command, submit_id, output_dir, cli_home=account.home_dir)
+                query_result = await query_dreamina_result(
+                    command,
+                    submit_id,
+                    output_dir,
+                    cli_home=account.home_dir,
+                    cancellation_check=cancellation_check,
+                )
                 query_status = find_generation_status(query_result)
                 if is_active_generation_status(query_status) or is_success_generation_status(query_status):
                     return await poll_dreamina_result(
@@ -1240,6 +1363,7 @@ async def generate_video_with_dreamina(
                         timeout_seconds=timeout_seconds,
                         initial_result=query_result,
                         progress_callback=progress_callback,
+                        cancellation_check=cancellation_check,
                     )
                 result = query_result
                 status = query_status
@@ -1260,6 +1384,7 @@ async def generate_video_with_dreamina(
                 timeout_seconds=timeout_seconds,
                 initial_result=result,
                 progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
             )
 
         if is_failed_generation_status(status):
@@ -1299,7 +1424,9 @@ async def generate_video(
     public_url_prefix: str = "/api/outputs",
     timeout_seconds: int = 7200,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancellation_check: Optional[Callable[[], None]] = None,
 ) -> JimengCliResult:
+    check_cancellation(cancellation_check)
     if resolve_dreamina_command():
         return await generate_video_with_dreamina(
             prompt=prompt,
@@ -1312,6 +1439,7 @@ async def generate_video(
             public_url_prefix=public_url_prefix,
             timeout_seconds=timeout_seconds,
             progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
         )
 
     command = resolve_legacy_cli_command()
@@ -1361,12 +1489,28 @@ async def generate_video(
         creationflags=creation_flags,
     )
 
+    communicate_task = asyncio.create_task(process.communicate())
+    deadline = time.monotonic() + max(timeout_seconds, 1)
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        while True:
+            check_cancellation(cancellation_check)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({communicate_task}, timeout=min(1.0, remaining))
+            if done:
+                stdout, stderr = communicate_task.result()
+                break
     except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.communicate()
+        if process.returncode is None:
+            process.kill()
+        await communicate_task
         raise JimengCliError("即梦 CLI 生成超时") from exc
+    except Exception:
+        if process.returncode is None:
+            process.kill()
+        await communicate_task
+        raise
 
     stdout_text = stdout.decode("utf-8", errors="replace")
     stderr_text = stderr.decode("utf-8", errors="replace")

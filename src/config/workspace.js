@@ -20,6 +20,7 @@ export const agentStageLabels = {
   jimeng_generating: '即梦 CLI 正在逐段生成',
   completed: '视频片段已全部返回',
   failed: '任务处理失败',
+  canceled: '任务已取消',
 };
 
 export const agentStageIndexes = {
@@ -32,6 +33,7 @@ export const agentStageIndexes = {
   jimeng_generating: 3,
   completed: 4,
   failed: 3,
+  canceled: 3,
 };
 
 export const AGENT_FAST_POLL_INTERVAL = 1200;

@@ -23,7 +23,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 try:
-    from .jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
+    from .jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot, wake_account_pool_waiters
     from . import billing, database
     from .billing import (
         BillingOverview,
@@ -35,7 +35,7 @@ try:
         RechargeRequest,
     )
 except ImportError:
-    from jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot
+    from jimeng_cli import JimengCliError, cli_public_status, generate_video, get_account_snapshot, wake_account_pool_waiters
     import billing
     import database
     from billing import (
@@ -384,6 +384,14 @@ class AgentJob:
     @property
     def key(self) -> str:
         return f"{self.kind}:{self.run_id}:{self.scene_id or ''}"
+
+
+class AgentRunCancelled(RuntimeError):
+    pass
+
+
+AGENT_TERMINAL_STATUSES = {"completed", "failed", "canceled"}
+AGENT_CANCELABLE_STATUSES = {"queued", "planning", "awaiting_confirmation", "generating"}
 
 cookie_pool: Dict[str, Cookie] = {
     "cookie-1": Cookie(
@@ -1416,6 +1424,7 @@ def backend_status_to_agent_status(status: str) -> str:
         "generating": "generating",
         "completed": "completed",
         "failed": "failed",
+        "canceled": "canceled",
     }.get(status, status)
 
 def clear_generation_failure(shot: Shot) -> None:
@@ -1486,6 +1495,153 @@ def apply_jimeng_progress_to_shot(shot: Shot, update: Dict[str, Any]) -> None:
     elif status in {"querying", "queueing", "queued", "pending", "submitted"}:
         shot.status = "generating"
         shot.progress = max(shot.progress, 8)
+
+
+def is_run_canceled(run_id: str) -> bool:
+    run = agent_runs.get(run_id)
+    return bool(run and run.status == "canceled")
+
+
+def ensure_run_not_canceled(run_id: str) -> None:
+    if is_run_canceled(run_id):
+        raise AgentRunCancelled("任务已取消")
+
+
+def is_scene_submitted_or_finished(scene: AgentRunScene) -> bool:
+    return bool(scene.jimengSubmitId or scene.videoUrl or scene.status == "completed")
+
+
+def user_can_cancel_run(run: AgentRun) -> bool:
+    if run.status not in AGENT_CANCELABLE_STATUSES:
+        return False
+    if not run.scenes:
+        return run.status in {"queued", "planning", "awaiting_confirmation"}
+    return not any(is_scene_submitted_or_finished(scene) for scene in run.scenes)
+
+
+def get_cancel_refundable_scenes(run: AgentRun) -> List[AgentRunScene]:
+    return [
+        scene for scene in run.scenes
+        if scene.status != "completed"
+        and not scene.videoUrl
+        and not scene.creditRefundedAt
+    ]
+
+
+async def remove_agent_jobs_for_run(run_id: str, *, scene_id: Optional[str] = None) -> int:
+    removed_count = 0
+    async with agent_scheduler_lock:
+        for key, job in list(agent_queued_jobs.items()):
+            if job.run_id == run_id and (scene_id is None or job.scene_id == scene_id):
+                agent_queued_jobs.pop(key, None)
+                removed_count += 1
+    return removed_count
+
+
+def mark_scene_canceled(
+    run: AgentRun,
+    scene: AgentRunScene,
+    *,
+    reason: str,
+    refund_credit: int = 0,
+) -> AgentRunScene:
+    updates: Dict[str, Any] = {
+        "status": "canceled",
+        "progress": scene.progress,
+        "error": reason,
+        "failureCategory": "canceled",
+        "failureTitle": "任务已取消",
+        "failureReason": "canceled",
+        "failureDetail": reason,
+        "queuePosition": None,
+        "queueTotal": None,
+        "queueStatus": "canceled",
+        "queueAhead": None,
+        "queueActive": None,
+        "queueCapacity": None,
+        "queueUpdatedAt": time.time(),
+    }
+    if refund_credit > 0 and not scene.creditRefundedAt:
+        updates["creditRefundedAt"] = time.time()
+        updates["refundCredit"] = refund_credit
+
+    shot = shots_db.get(scene.id)
+    if shot:
+        shot.status = "canceled"
+        shot.error = reason
+        shot.failureCategory = "canceled"
+        shot.failureTitle = "任务已取消"
+        shot.failureReason = "canceled"
+        shot.failureDetail = reason
+        shot.queuePosition = None
+        shot.queueTotal = None
+        shot.queueStatus = "canceled"
+        shot.queueAhead = None
+        shot.queueActive = None
+        shot.queueCapacity = None
+        shot.queueUpdatedAt = time.time()
+
+    return copy_model_with_update(scene, updates)
+
+
+def refund_cancelable_scenes(run: AgentRun, *, reason: str) -> int:
+    total_refund = 0
+    refundable_scene_ids = {scene.id for scene in get_cancel_refundable_scenes(run)}
+    next_scenes = []
+    for scene in run.scenes:
+        refund_credit = 0
+        if scene.id in refundable_scene_ids:
+            refund_credit = get_scene_credit_cost(run, scene)
+            if refund_credit > 0:
+                refund_user_credits(
+                    run.userEmail,
+                    refund_credit,
+                    f"任务取消返还：{scene.number} / {scene.title}",
+                    run_id=run.id,
+                )
+                total_refund += refund_credit
+        if scene.status in {"queued", "waiting", "generating"} or scene.id in refundable_scene_ids:
+            next_scenes.append(mark_scene_canceled(run, scene, reason=reason, refund_credit=refund_credit))
+        else:
+            next_scenes.append(scene)
+    run.scenes = next_scenes
+    return total_refund
+
+
+async def cancel_agent_run_internal(
+    run: AgentRun,
+    *,
+    actor: UserRecord,
+    admin_force: bool = False,
+    reason: Optional[str] = None,
+) -> AgentRun:
+    run = sync_run_from_shots(run)
+    if run.status in AGENT_TERMINAL_STATUSES:
+        return run
+    if not admin_force and not user_can_cancel_run(run):
+        raise HTTPException(status_code=409, detail="当前任务已提交即梦或已有结果，不能由用户取消，请联系管理员处理")
+
+    cancel_reason = (reason or "").strip()
+    if not cancel_reason:
+        cancel_reason = "管理员已取消任务" if admin_force else "用户已取消排队任务"
+    refund_credit = refund_cancelable_scenes(run, reason=cancel_reason)
+    await remove_agent_jobs_for_run(run.id)
+    wake_account_pool_waiters()
+
+    run.status = "canceled"
+    run.stage = "canceled"
+    run.progress = 100
+    run.error = f"{cancel_reason}。已返还 {refund_credit} 积分。" if refund_credit > 0 else cancel_reason
+    run.updatedAt = time.time()
+    persist_agent_run(run)
+    logger.info(
+        "Agent run %s canceled by %s (admin_force=%s, refund=%s).",
+        run.id,
+        get_user_contact(actor),
+        admin_force,
+        refund_credit,
+    )
+    return run
 
 def make_agent_job(
     kind: Literal["plan", "generate", "retry", "resume"],
@@ -1570,20 +1726,36 @@ async def enqueue_agent_job(
             "queuePosition": agent_job_queue.qsize(),
         }
 
-async def claim_agent_job(job: AgentJob) -> bool:
+def should_skip_agent_job(job: AgentJob) -> bool:
+    run = agent_runs.get(job.run_id)
+    if not run:
+        return True
+    if run.status in AGENT_TERMINAL_STATUSES:
+        return True
+    if job.kind == "plan" and run.candidates:
+        return True
+    if job.kind in {"generate", "resume"} and not run.scenes:
+        return True
+    return False
+
+
+async def claim_agent_job(job: AgentJob) -> str:
     async with agent_scheduler_lock:
         if job.key not in agent_queued_jobs:
-            return False
+            return "missing"
+        if should_skip_agent_job(job):
+            agent_queued_jobs.pop(job.key, None)
+            return "skipped"
         if (
             not job.bypass_user_limits
             and job.user_id
             and AGENT_USER_ACTIVE_RUN_LIMIT > 0
             and count_agent_jobs_by_user(job.user_id)[0] >= AGENT_USER_ACTIVE_RUN_LIMIT
         ):
-            return False
+            return "deferred"
         agent_queued_jobs.pop(job.key, None)
         agent_active_jobs[job.key] = job
-        return True
+        return "claimed"
 
 async def requeue_agent_job(job: AgentJob) -> None:
     async with agent_scheduler_lock:
@@ -1598,6 +1770,8 @@ async def release_agent_job(job: AgentJob) -> None:
         agent_active_jobs.pop(job.key, None)
 
 async def dispatch_agent_job(job: AgentJob) -> None:
+    if should_skip_agent_job(job):
+        return
     if job.kind == "plan":
         await process_agent_run(job.run_id)
     elif job.kind == "generate":
@@ -1618,10 +1792,13 @@ async def agent_worker(worker_id: int) -> None:
             job = await agent_job_queue.get()
             claimed = False
             try:
-                claimed = await claim_agent_job(job)
-                if not claimed:
+                claim_status = await claim_agent_job(job)
+                if claim_status == "deferred":
                     await requeue_agent_job(job)
                     continue
+                if claim_status != "claimed":
+                    continue
+                claimed = True
                 logger.info("Agent worker %s handling %s.", worker_id, job.key)
                 await dispatch_agent_job(job)
             except asyncio.CancelledError:
@@ -1687,6 +1864,7 @@ async def process_agent_run(run_id: str) -> None:
     )
 
     try:
+        ensure_run_not_canceled(run_id)
         settings = load_agent_settings()
         run.status = "planning"
         run.stage = "storyboard_planning" if settings.deepseekApiKey else "local_planning"
@@ -1695,6 +1873,7 @@ async def process_agent_run(run_id: str) -> None:
         persist_agent_run(run)
 
         candidates, planner_model = await build_scene_plan(payload, run_id, settings)
+        ensure_run_not_canceled(run_id)
         run.agentModel = planner_model
         run.candidates = candidates
         run.status = "awaiting_confirmation"
@@ -1703,6 +1882,8 @@ async def process_agent_run(run_id: str) -> None:
         run.updatedAt = time.time()
         persist_agent_run(run)
         logger.info("Agent run %s created %s editable storyboard candidates.", run_id, len(candidates))
+    except AgentRunCancelled:
+        logger.info("Agent run %s planning stopped because it was canceled.", run_id)
     except Exception as exc:
         run.status = "failed"
         run.stage = "failed"
@@ -1840,6 +2021,7 @@ def refund_failed_scene_if_needed(run: AgentRun, scene: AgentRunScene) -> None:
     mark_scene_refunded(run, scene.id, refund_credit)
 
 async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: AgentSettings) -> None:
+    ensure_run_not_canceled(run.id)
     shot = shots_db[scene.id]
     shot.status = "generating"
     shot.progress = 5
@@ -1865,7 +2047,9 @@ async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: A
                 public_root=OUTPUTS_DIR,
                 public_url_prefix="/api/outputs",
                 progress_callback=lambda update: apply_jimeng_progress_to_shot(shot, update),
+                cancellation_check=lambda: ensure_run_not_canceled(run.id),
             )
+            ensure_run_not_canceled(run.id)
             shot.videoUrl = result.video_url
             shot.progress = 100
             shot.status = "completed"
@@ -1874,6 +2058,14 @@ async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: A
             shot.jimengAccountAlias = result.account_alias or shot.jimengAccountAlias
         else:
             raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
+    except AgentRunCancelled as exc:
+        shot.status = "canceled"
+        shot.error = str(exc)
+        shot.failureCategory = "canceled"
+        shot.failureTitle = "任务已取消"
+        shot.failureReason = "canceled"
+        shot.failureDetail = str(exc)
+        logger.info("Jimeng scene %s stopped because run was canceled.", scene.id)
     except (JimengCliError, RuntimeError) as exc:
         shot.status = "failed"
         shot.progress = 0
@@ -1892,6 +2084,7 @@ async def process_confirmed_run(run_id: str) -> None:
         return
 
     try:
+        ensure_run_not_canceled(run_id)
         settings = load_agent_settings()
         run.status = "generating"
         run.stage = "jimeng_dispatch"
@@ -1912,10 +2105,13 @@ async def process_confirmed_run(run_id: str) -> None:
         persist_agent_run(run)
 
         for scene in run.scenes:
+            ensure_run_not_canceled(run_id)
             await generate_single_scene(run, scene, settings)
 
         sync_run_from_shots(run)
         logger.info("Agent run %s finished sequential Jimeng generation.", run_id)
+    except AgentRunCancelled:
+        logger.info("Confirmed Agent run %s stopped because it was canceled.", run_id)
     except Exception as exc:
         run.status = "failed"
         run.stage = "failed"
@@ -1939,6 +2135,7 @@ async def resume_confirmed_run(run_id: str) -> None:
         return
 
     try:
+        ensure_run_not_canceled(run_id)
         settings = load_agent_settings()
         run.status = "generating"
         run.stage = "jimeng_dispatch"
@@ -1947,6 +2144,7 @@ async def resume_confirmed_run(run_id: str) -> None:
         persist_agent_run(run)
 
         for scene in pending_scenes:
+            ensure_run_not_canceled(run_id)
             current_run = agent_runs.get(run_id, run)
             current_scene = next((item for item in current_run.scenes if item.id == scene.id), scene)
             if current_scene.status in {"completed", "failed"}:
@@ -1964,6 +2162,8 @@ async def resume_confirmed_run(run_id: str) -> None:
 
         sync_run_from_shots(agent_runs.get(run_id, run))
         logger.info("Agent run %s resumed pending scene generation.", run_id)
+    except AgentRunCancelled:
+        logger.info("Resumed Agent run %s stopped because it was canceled.", run_id)
     except Exception as exc:
         run = agent_runs.get(run_id, run)
         run.status = "failed"
@@ -1993,6 +2193,7 @@ async def process_scene_retry(run_id: str, scene_id: str) -> None:
         return
 
     try:
+        ensure_run_not_canceled(run_id)
         settings = load_agent_settings()
         run.status = "generating"
         run.stage = "jimeng_generating"
@@ -2011,6 +2212,8 @@ async def process_scene_retry(run_id: str, scene_id: str) -> None:
         await generate_single_scene(run, scene, settings)
         sync_run_from_shots(run)
         logger.info("Agent run %s retried scene %s.", run_id, scene_id)
+    except AgentRunCancelled:
+        logger.info("Scene retry %s/%s stopped because run was canceled.", run_id, scene_id)
     except Exception as exc:
         shot = shots_db.get(scene_id)
         if shot:
@@ -2799,6 +3002,39 @@ async def retry_agent_scene(
         persist_agent_run(run)
         raise
     return sync_run_from_shots(run)
+
+
+@app.post("/agent/runs/{run_id}/cancel", response_model=AgentRun)
+async def cancel_my_agent_run(
+    run_id: str,
+    current_user: UserRecord = Depends(get_current_user),
+):
+    run = agent_runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if current_user.role != "admin" and run.userId != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot cancel this Agent run")
+    return await cancel_agent_run_internal(
+        run,
+        actor=current_user,
+        admin_force=current_user.role == "admin",
+    )
+
+
+@app.post("/admin/agent/runs/{run_id}/cancel", response_model=AgentRun)
+async def cancel_admin_agent_run(
+    run_id: str,
+    admin_user: UserRecord = Depends(require_admin),
+):
+    run = agent_runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return await cancel_agent_run_internal(
+        run,
+        actor=admin_user,
+        admin_force=True,
+        reason="管理员已强制取消任务",
+    )
 
 @app.get("/agent/runs/{run_id}", response_model=AgentRun)
 def get_agent_run(run_id: str, current_user: UserRecord = Depends(get_current_user)):

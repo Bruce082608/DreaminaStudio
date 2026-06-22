@@ -2837,6 +2837,25 @@
   font-weight: 900;
 }
 
+.queue-cancel-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2.4rem;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 0.62rem;
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.queue-cancel-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .queue-failure-list {
   display: grid;
   gap: 0.45rem;
@@ -3284,6 +3303,11 @@
 .status-pill.failed {
   background: rgba(248, 113, 113, 0.13);
   color: #fca5a5;
+}
+
+.status-pill.canceled {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
 }
 
 .scene-main p {
@@ -4448,9 +4472,9 @@
 }
 
 .agent-run-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 0.8rem;
   min-height: 4.3rem;
   padding: 0.75rem;
@@ -4477,6 +4501,26 @@
   margin-top: 0.28rem;
   color: #738094;
   font-size: 0.74rem;
+}
+
+.agent-run-cancel-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  padding: 0 0.56rem;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 0.55rem;
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.agent-run-cancel-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .jimeng-admin-panel {

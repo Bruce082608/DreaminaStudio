@@ -5,6 +5,7 @@ const statusMap = {
   waiting: '等待中',
   locked: '待提交',
   failed: '失败',
+  canceled: '已取消',
 };
 
 export default function StatusPill({ status }) {

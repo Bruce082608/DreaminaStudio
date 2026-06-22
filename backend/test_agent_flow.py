@@ -367,8 +367,182 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1 个分镜生成失败", synced_run.error)
         self.assertIn("即梦平台接口异常", synced_run.error)
 
+    async def test_user_can_cancel_unsubmitted_generation_and_get_refund(self):
+        user = main.UserRecord(
+            id="user-cancel",
+            name="取消用户",
+            email="cancel@example.com",
+            passwordHash="not-used",
+            creditBalance=0,
+            createdAt=main.time.time(),
+        )
+        main.save_users({user.email: user})
+        run = main.AgentRun(
+            id="agent-cancel",
+            userId=user.id,
+            userEmail=user.email,
+            idea="排队后取消",
+            duration=30,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            jimengModel="seedance2.0fast",
+            status="queued",
+            stage="jimeng_dispatch",
+            creditCost=60,
+            creditChargedAt=main.time.time(),
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="scene-cancel-1",
+                    number="01",
+                    time="0:00 - 0:15",
+                    title="排队一",
+                    prompt="测试提示词一",
+                    duration=15,
+                    status="waiting",
+                ),
+                main.AgentRunScene(
+                    id="scene-cancel-2",
+                    number="02",
+                    time="0:15 - 0:30",
+                    title="排队二",
+                    prompt="测试提示词二",
+                    duration=15,
+                    status="waiting",
+                ),
+            ],
+        )
+        main.agent_runs[run.id] = run
+        await main.enqueue_agent_job("generate", run)
+
+        canceled_run = await main.cancel_my_agent_run(run.id, user)
+        refunded_user = main.load_users()[user.email]
+
+        self.assertEqual(canceled_run.status, "canceled")
+        self.assertEqual(canceled_run.stage, "canceled")
+        self.assertEqual(refunded_user.creditBalance, 60)
+        self.assertEqual(len(main.agent_queued_jobs), 0)
+        self.assertTrue(all(scene.status == "canceled" for scene in canceled_run.scenes))
+        self.assertEqual(sum(scene.refundCredit for scene in canceled_run.scenes), 60)
+
+    async def test_user_cannot_cancel_after_jimeng_submission(self):
+        user = main.UserRecord(
+            id="user-submitted",
+            name="已提交用户",
+            email="submitted@example.com",
+            passwordHash="not-used",
+            creditBalance=0,
+            createdAt=main.time.time(),
+        )
+        main.save_users({user.email: user})
+        run = main.AgentRun(
+            id="agent-submitted",
+            userId=user.id,
+            userEmail=user.email,
+            idea="已提交即梦",
+            duration=15,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            jimengModel="seedance2.0fast",
+            status="generating",
+            stage="jimeng_generating",
+            creditCost=30,
+            creditChargedAt=main.time.time(),
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="scene-submitted",
+                    number="01",
+                    time="0:00 - 0:15",
+                    title="已提交",
+                    prompt="测试提示词",
+                    duration=15,
+                    status="generating",
+                    jimengSubmitId="submit-123",
+                ),
+            ],
+        )
+        main.agent_runs[run.id] = run
+
+        with self.assertRaises(main.HTTPException) as cancel_error:
+            await main.cancel_my_agent_run(run.id, user)
+
+        self.assertEqual(cancel_error.exception.status_code, 409)
+        self.assertEqual(main.load_users()[user.email].creditBalance, 0)
+
+    async def test_admin_can_force_cancel_submitted_run_and_refund_unfinished_scenes(self):
+        user = main.UserRecord(
+            id="user-admin-cancel",
+            name="被取消用户",
+            email="admin-cancel@example.com",
+            passwordHash="not-used",
+            creditBalance=0,
+            createdAt=main.time.time(),
+        )
+        admin = main.UserRecord(
+            id="admin-cancel",
+            name="管理员",
+            email="admin-cancel-owner@example.com",
+            passwordHash="not-used",
+            role="admin",
+            createdAt=main.time.time(),
+        )
+        main.save_users({user.email: user, admin.email: admin})
+        run = main.AgentRun(
+            id="agent-admin-force-cancel",
+            userId=user.id,
+            userEmail=user.email,
+            idea="管理员强制取消",
+            duration=30,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            jimengModel="seedance2.0fast",
+            status="generating",
+            stage="jimeng_generating",
+            creditCost=60,
+            creditChargedAt=main.time.time(),
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="scene-admin-cancel-1",
+                    number="01",
+                    time="0:00 - 0:15",
+                    title="已提交但未完成",
+                    prompt="测试提示词一",
+                    duration=15,
+                    status="generating",
+                    jimengSubmitId="submit-force",
+                ),
+                main.AgentRunScene(
+                    id="scene-admin-cancel-2",
+                    number="02",
+                    time="0:15 - 0:30",
+                    title="等待中",
+                    prompt="测试提示词二",
+                    duration=15,
+                    status="waiting",
+                ),
+            ],
+        )
+        main.agent_runs[run.id] = run
+
+        canceled_run = await main.cancel_admin_agent_run(run.id, admin)
+        refunded_user = main.load_users()[user.email]
+
+        self.assertEqual(canceled_run.status, "canceled")
+        self.assertEqual(canceled_run.stage, "canceled")
+        self.assertEqual(refunded_user.creditBalance, 60)
+        self.assertIn("管理员已强制取消任务", canceled_run.error)
+        self.assertTrue(all(scene.status == "canceled" for scene in canceled_run.scenes))
+
     async def test_jimeng_account_pool_waits_fifo_with_visible_positions(self):
-        async def no_active_tasks(command, account, output_dir):
+        async def no_active_tasks(command, account, output_dir, **_kwargs):
             return []
 
         with tempfile.TemporaryDirectory() as temp_dir:
