@@ -273,13 +273,35 @@ function getSceneFailureInfo(scene) {
 function getSceneQueueInfo(scene) {
   const position = Number(scene?.queuePosition || 0);
   const total = Number(scene?.queueTotal || 0);
+  const queueStatus = String(scene?.queueStatus || '');
+  const isAccountPoolQueue = queueStatus === 'account_pool_waiting';
+
+  if (isAccountPoolQueue) {
+    const safePosition = Math.max(position || 1, 1);
+    const safeTotal = Math.max(total || safePosition, safePosition);
+    const ahead = Number.isFinite(Number(scene?.queueAhead)) ? Math.max(Number(scene.queueAhead), 0) : Math.max(safePosition - 1, 0);
+    const active = Number(scene?.queueActive || 0);
+    const capacity = Number(scene?.queueCapacity || 0);
+    const occupancy = capacity > 0 ? `号池 ${Math.min(active, capacity)}/${capacity} 占用` : '';
+    const progress = Math.max(0, Math.min(95, Math.round(((safeTotal - safePosition) / safeTotal) * 100)));
+    return {
+      label: `号池排队第 ${safePosition} 位 / 共 ${safeTotal} 个等待`,
+      meta: [`前方 ${ahead} 个`, occupancy].filter(Boolean).join(' · '),
+      progress,
+      status: queueStatus,
+      accountLabel: '',
+    };
+  }
+
   if (!position || !total) return null;
 
   const progress = Math.max(0, Math.min(100, Math.round(((total - position) / total) * 100)));
   return {
-    label: `排队 ${position}/${total}`,
+    label: `即梦排队 ${position}/${total}`,
+    meta: '',
     progress,
-    status: scene?.queueStatus || '',
+    status: queueStatus,
+    accountLabel: scene?.jimengAccountAlias || scene?.jimengAccountId || '',
   };
 }
 
@@ -1626,7 +1648,11 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                 <div className="queue-position-card">
                   <span>
                     <strong>{primaryQueueInfo.scene.number} {primaryQueueInfo.scene.title}</strong>
-                    <small>{primaryQueueInfo.queue.label}</small>
+                    <small>
+                      {primaryQueueInfo.queue.label}
+                      {primaryQueueInfo.queue.meta ? ` · ${primaryQueueInfo.queue.meta}` : ''}
+                      {primaryQueueInfo.queue.accountLabel ? ` · ${primaryQueueInfo.queue.accountLabel}` : ''}
+                    </small>
                   </span>
                   <em>{primaryQueueInfo.queue.progress}%</em>
                 </div>
@@ -1800,6 +1826,8 @@ export default function WorkspacePage({ auth, billingState, onShowCredits, onSho
                         <span>
                           <Clock3 size={13} />
                           {queue.label}
+                          {queue.meta ? ` · ${queue.meta}` : ''}
+                          {queue.accountLabel ? ` · ${queue.accountLabel}` : ''}
                         </span>
                         <em>{queue.progress}%</em>
                       </div>

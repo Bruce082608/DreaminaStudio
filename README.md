@@ -165,3 +165,53 @@ docker exec -it dreamina_backend dreamina login
 ```
 
 Because `/root` is mounted to `/var/lib/dreamina_studio/cli-home`, the CLI login state survives container rebuilds.
+
+## Jimeng CLI Account Pool
+
+By default the backend uses the single CLI login state mounted at `/root`. For higher throughput, configure multiple independent Jimeng CLI accounts in the backend `.env`:
+
+```bash
+DREAMINA_CLI_ACCOUNTS='[
+  {"id":"vip-1","alias":"高级号1","home":"/app/data/cli-accounts/vip-1","maxConcurrent":1},
+  {"id":"vip-2","alias":"高级号2","home":"/app/data/cli-accounts/vip-2","maxConcurrent":1}
+]'
+```
+
+Each `home` path stores one account's OAuth login/cache. The backend scheduler leases one available account slot per video task, skips accounts that still have active Jimeng tasks, and waits when the whole pool is busy. Keep `maxConcurrent` at `1` unless Jimeng explicitly allows more concurrent tasks for that account.
+
+Log in each account separately:
+
+```bash
+docker exec -it -e HOME=/app/data/cli-accounts/vip-1 dreamina_backend dreamina login
+docker exec -it -e HOME=/app/data/cli-accounts/vip-2 dreamina_backend dreamina login
+```
+
+Check pool status from the admin API or inside the container:
+
+```bash
+docker exec -it -e HOME=/app/data/cli-accounts/vip-1 dreamina_backend dreamina user_credit
+docker exec -it -e HOME=/app/data/cli-accounts/vip-2 dreamina_backend dreamina user_credit
+```
+
+## Agent Concurrency Controls
+
+Creative runs now enter a site-level Agent job queue before calling DeepSeek or Jimeng. The queue prevents public traffic spikes from creating unlimited long-running backend tasks, while async workers keep the Jimeng account pool busy.
+
+Tune these values in the backend `.env`:
+
+```bash
+DREAMINA_AGENT_WORKERS=4
+DREAMINA_AGENT_MAX_QUEUE_SIZE=200
+DREAMINA_USER_ACTIVE_RUN_LIMIT=2
+DREAMINA_USER_QUEUED_RUN_LIMIT=20
+DREAMINA_AGENT_REQUEUE_DELAY_SECONDS=0.5
+```
+
+Suggested starting point:
+
+- Set `DREAMINA_AGENT_WORKERS` close to the total Jimeng account pool capacity, for example 8 accounts x `maxConcurrent=1` = 8 workers.
+- Keep each Jimeng account `maxConcurrent=1` unless Jimeng explicitly allows more concurrent generations for that account.
+- Increase `DREAMINA_AGENT_MAX_QUEUE_SIZE` only when the server has enough CPU, memory, disk, and operator visibility to handle the backlog.
+- Use `DREAMINA_USER_ACTIVE_RUN_LIMIT` and `DREAMINA_USER_QUEUED_RUN_LIMIT` to stop one customer from filling the queue during traffic spikes.
+
+Current limits are in-process. For multiple backend containers or Uvicorn workers, move Agent jobs and run state to Redis/Postgres-backed infrastructure before scaling horizontally.

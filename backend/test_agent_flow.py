@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi import BackgroundTasks
-
 from backend import jimeng_cli
 from backend import main
 
@@ -101,6 +99,14 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         main.shots_db.clear()
         main.uploaded_references.clear()
         main.task_queue = asyncio.Queue()
+        main.agent_job_queue = asyncio.Queue(maxsize=main.AGENT_MAX_QUEUE_SIZE)
+        main.agent_queued_jobs.clear()
+        main.agent_active_jobs.clear()
+        jimeng_cli._account_pool_semaphores.clear()
+        jimeng_cli._account_pool_limits.clear()
+        jimeng_cli._account_pool_waiters.clear()
+        jimeng_cli._account_pool_condition = None
+        jimeng_cli._account_pool_condition_loop = None
 
     async def asyncTearDown(self):
         self.uploads_dir_patcher.stop()
@@ -141,7 +147,6 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "MOCK_GENERATION_ERROR_RATE", 0),
             patch.object(main, "charge_user_credits"),
         ):
-            background_tasks = BackgroundTasks()
             current_user = main.UserRecord(
                 id=run.userId,
                 name="测试用户",
@@ -163,9 +168,9 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
                         for scene in selected_candidate.scenes
                     ],
                 ),
-                background_tasks,
                 current_user,
             )
+            self.assertEqual(main.agent_job_queue.qsize(), 1)
             await main.process_confirmed_run(run.id)
 
         completed_run = main.sync_run_from_shots(main.agent_runs[run.id])
@@ -175,6 +180,253 @@ class AgentFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed_run.creditCost, 60)
         self.assertTrue(completed_run.finalVideoUrl)
         self.assertTrue(all(scene.status == "completed" for scene in completed_run.scenes))
+
+    async def test_agent_job_queue_deduplicates_same_run(self):
+        run = main.AgentRun(
+            id="agent-queue-dedupe",
+            userId="user-queue",
+            userEmail="queue@example.com",
+            idea="测试队列去重",
+            duration=30,
+            style="电影感",
+            ratio="16:9",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+        )
+
+        first = await main.enqueue_agent_job("plan", run)
+        second = await main.enqueue_agent_job("plan", run)
+
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "already_queued")
+        self.assertEqual(main.agent_job_queue.qsize(), 1)
+        self.assertEqual(len(main.agent_queued_jobs), 1)
+
+    async def test_agent_job_queue_full_rejects_new_runs(self):
+        main.agent_job_queue = asyncio.Queue(maxsize=1)
+        first_run = main.AgentRun(
+            id="agent-queue-full-1",
+            userId="user-queue",
+            userEmail="queue@example.com",
+            idea="第一个任务",
+            duration=30,
+            style="电影感",
+            ratio="16:9",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+        )
+        second_run = main.AgentRun(
+            id="agent-queue-full-2",
+            userId="user-queue",
+            userEmail="queue@example.com",
+            idea="第二个任务",
+            duration=30,
+            style="电影感",
+            ratio="16:9",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+        )
+
+        await main.enqueue_agent_job("plan", first_run)
+
+        with self.assertRaises(main.HTTPException) as queue_error:
+            await main.enqueue_agent_job("plan", second_run)
+
+        self.assertEqual(queue_error.exception.status_code, 429)
+
+    async def test_account_pool_waiting_progress_syncs_to_scene(self):
+        run = main.AgentRun(
+            id="agent-pool-queue",
+            userId="user-pool",
+            userEmail="pool@example.com",
+            idea="测试号池排队",
+            duration=15,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            status="generating",
+            stage="jimeng_generating",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="scene-pool-queue",
+                    number="01",
+                    time="0:00 - 0:15",
+                    title="等待账号",
+                    prompt="测试提示词",
+                    duration=15,
+                    status="waiting",
+                )
+            ],
+        )
+        shot = main.Shot(
+            id="scene-pool-queue",
+            prompt="测试提示词",
+            duration=15,
+            engine="jimeng",
+            status="generating",
+            progress=5,
+        )
+
+        main.apply_jimeng_progress_to_shot(shot, {
+            "status": "account_pool_waiting",
+            "queueInfo": {
+                "position": 2,
+                "total": 3,
+                "status": "account_pool_waiting",
+                "ahead": 1,
+                "active": 2,
+                "capacity": 2,
+            },
+        })
+        main.shots_db[shot.id] = shot
+        synced_run = main.sync_run_from_shots(run)
+        synced_scene = synced_run.scenes[0]
+
+        self.assertEqual(shot.status, "waiting")
+        self.assertEqual(synced_scene.queuePosition, 2)
+        self.assertEqual(synced_scene.queueTotal, 3)
+        self.assertEqual(synced_scene.queueAhead, 1)
+        self.assertEqual(synced_scene.queueActive, 2)
+        self.assertEqual(synced_scene.queueCapacity, 2)
+
+        main.apply_jimeng_progress_to_shot(shot, {
+            "status": "account_acquired",
+            "accountId": "vip-1",
+            "accountAlias": "高级号1",
+        })
+
+        self.assertEqual(shot.status, "generating")
+        self.assertIsNone(shot.queuePosition)
+        self.assertEqual(shot.queueStatus, "account_acquired")
+        self.assertEqual(shot.jimengAccountAlias, "高级号1")
+
+    async def test_partial_scene_failure_marks_run_failed_with_reason(self):
+        run = main.AgentRun(
+            id="agent-partial-failure",
+            userId="user-partial",
+            userEmail="partial@example.com",
+            idea="测试部分失败",
+            duration=30,
+            segmentDuration=15,
+            style="电影感",
+            ratio="16:9",
+            status="generating",
+            stage="jimeng_generating",
+            createdAt=main.time.time(),
+            updatedAt=main.time.time(),
+            scenes=[
+                main.AgentRunScene(
+                    id="scene-partial-ok",
+                    number="01",
+                    time="0:00 - 0:15",
+                    title="成功片段",
+                    prompt="测试提示词一",
+                    duration=15,
+                    status="generating",
+                ),
+                main.AgentRunScene(
+                    id="scene-partial-fail",
+                    number="02",
+                    time="0:15 - 0:30",
+                    title="失败片段",
+                    prompt="测试提示词二",
+                    duration=15,
+                    status="generating",
+                ),
+            ],
+        )
+        main.shots_db["scene-partial-ok"] = main.Shot(
+            id="scene-partial-ok",
+            prompt="测试提示词一",
+            duration=15,
+            engine="jimeng",
+            status="completed",
+            progress=100,
+            videoUrl="/api/outputs/ok.mp4",
+        )
+        main.shots_db["scene-partial-fail"] = main.Shot(
+            id="scene-partial-fail",
+            prompt="测试提示词二",
+            duration=15,
+            engine="jimeng",
+            status="failed",
+            progress=0,
+            failureCategory="platform",
+            failureTitle="即梦平台接口异常",
+            failureDetail="即梦返回 API 失败",
+        )
+
+        synced_run = main.sync_run_from_shots(run)
+
+        self.assertEqual(synced_run.status, "failed")
+        self.assertEqual(synced_run.stage, "failed")
+        self.assertEqual(synced_run.progress, 100)
+        self.assertEqual(synced_run.finalVideoUrl, "/api/outputs/ok.mp4")
+        self.assertIn("1 个分镜生成失败", synced_run.error)
+        self.assertIn("即梦平台接口异常", synced_run.error)
+
+    async def test_jimeng_account_pool_waits_fifo_with_visible_positions(self):
+        async def no_active_tasks(command, account, output_dir):
+            return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_home = Path(temp_dir) / "vip-1"
+            output_dir = Path(temp_dir) / "outputs"
+            account_config = json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": str(account_home),
+                    "maxConcurrent": 1,
+                }
+            ], ensure_ascii=False)
+            second_updates = []
+            third_updates = []
+
+            with (
+                patch.dict(jimeng_cli.os.environ, {"DREAMINA_CLI_ACCOUNTS": account_config}),
+                patch.object(jimeng_cli, "get_active_generation_tasks", no_active_tasks),
+                patch.object(jimeng_cli, "DREAMINA_CLI_SLOT_CHECK_INTERVAL_SECONDS", 0.05),
+            ):
+                first_lease = await jimeng_cli.acquire_account_lease(["dreamina"], 5, output_dir)
+                second_task = asyncio.create_task(jimeng_cli.acquire_account_lease(
+                    ["dreamina"],
+                    5,
+                    output_dir,
+                    progress_callback=second_updates.append,
+                ))
+                await asyncio.sleep(0.05)
+                third_task = asyncio.create_task(jimeng_cli.acquire_account_lease(
+                    ["dreamina"],
+                    5,
+                    output_dir,
+                    progress_callback=third_updates.append,
+                ))
+                await asyncio.sleep(0.05)
+
+                second_positions = [
+                    update["queueInfo"]
+                    for update in second_updates
+                    if update.get("status") == "account_pool_waiting"
+                ]
+                third_positions = [
+                    update["queueInfo"]
+                    for update in third_updates
+                    if update.get("status") == "account_pool_waiting"
+                ]
+                self.assertTrue(any(info["position"] == 1 for info in second_positions))
+                self.assertTrue(any(info["position"] == 2 and info["total"] == 2 for info in third_positions))
+                self.assertTrue(any(info["active"] == 1 and info["capacity"] == 1 for info in second_positions))
+
+                first_lease.release()
+                second_lease = await asyncio.wait_for(second_task, timeout=2)
+                self.assertFalse(third_task.done())
+
+                second_lease.release()
+                third_lease = await asyncio.wait_for(third_task, timeout=2)
+                third_lease.release()
 
     async def test_agent_run_history_survives_memory_reset(self):
         run = main.AgentRun(
@@ -502,6 +754,30 @@ Dreamina CLI
         self.assertEqual(queue_info["position"], 1254)
         self.assertEqual(queue_info["total"], 3576)
         self.assertEqual(queue_info["status"], "1")
+
+    def test_jimeng_account_pool_config_parses_multiple_accounts(self):
+        with patch.dict(jimeng_cli.os.environ, {
+            "DREAMINA_CLI_ACCOUNTS": json.dumps([
+                {
+                    "id": "vip-1",
+                    "alias": "高级号1",
+                    "home": "/tmp/dreamina-vip-1",
+                    "maxConcurrent": 1,
+                },
+                {
+                    "id": "vip-2",
+                    "alias": "高级号2",
+                    "home": "/tmp/dreamina-vip-2",
+                    "maxConcurrent": 2,
+                },
+            ], ensure_ascii=False),
+        }):
+            accounts = jimeng_cli.parse_account_pool_config()
+
+        self.assertEqual([account.id for account in accounts], ["vip-1", "vip-2"])
+        self.assertEqual(accounts[0].alias, "高级号1")
+        self.assertEqual(str(accounts[1].home_dir), "/tmp/dreamina-vip-2")
+        self.assertEqual(accounts[1].max_concurrent, 2)
 
     def test_recharge_and_generation_charge_update_balance(self):
         with tempfile.TemporaryDirectory() as temp_dir:

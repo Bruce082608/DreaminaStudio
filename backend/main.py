@@ -10,10 +10,11 @@ import re
 import secrets
 import smtplib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from email.message import EmailMessage
 from typing import Any, Dict, List, Literal, Optional
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
@@ -109,9 +110,14 @@ class Shot(BaseModel):
     failureSubmitId: Optional[str] = None
     failureLogId: Optional[str] = None
     jimengSubmitId: Optional[str] = None
+    jimengAccountId: Optional[str] = None
+    jimengAccountAlias: Optional[str] = None
     queuePosition: Optional[int] = None
     queueTotal: Optional[int] = None
     queueStatus: Optional[str] = None
+    queueAhead: Optional[int] = None
+    queueActive: Optional[int] = None
+    queueCapacity: Optional[int] = None
     queueUpdatedAt: Optional[float] = None
 
 class CompileParams(BaseModel):
@@ -256,9 +262,14 @@ class AgentRunScene(BaseModel):
     failureSubmitId: Optional[str] = None
     failureLogId: Optional[str] = None
     jimengSubmitId: Optional[str] = None
+    jimengAccountId: Optional[str] = None
+    jimengAccountAlias: Optional[str] = None
     queuePosition: Optional[int] = None
     queueTotal: Optional[int] = None
     queueStatus: Optional[str] = None
+    queueAhead: Optional[int] = None
+    queueActive: Optional[int] = None
+    queueCapacity: Optional[int] = None
     queueUpdatedAt: Optional[float] = None
     creditRefundedAt: Optional[float] = None
     refundCredit: int = 0
@@ -328,6 +339,52 @@ class UploadedReference(BaseModel):
 # In-Memory Database / State
 # ==========================================
 
+def env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+def env_int(name: str, default: int, *, minimum: int = 0, maximum: Optional[int] = None) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value not in (None, "") else default
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r, using %s", name, raw_value, default)
+        value = default
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+def env_float(name: str, default: float, *, minimum: float = 0.0, maximum: Optional[float] = None) -> float:
+    raw_value = os.getenv(name)
+    try:
+        value = float(raw_value) if raw_value not in (None, "") else default
+    except ValueError:
+        logger.warning("Invalid float for %s=%r, using %s", name, raw_value, default)
+        value = default
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+AGENT_WORKER_COUNT = env_int("DREAMINA_AGENT_WORKERS", 4, minimum=1, maximum=64)
+AGENT_MAX_QUEUE_SIZE = env_int("DREAMINA_AGENT_MAX_QUEUE_SIZE", 200, minimum=1, maximum=10000)
+AGENT_USER_ACTIVE_RUN_LIMIT = env_int("DREAMINA_USER_ACTIVE_RUN_LIMIT", 2, minimum=0, maximum=1000)
+AGENT_USER_QUEUED_RUN_LIMIT = env_int("DREAMINA_USER_QUEUED_RUN_LIMIT", 20, minimum=0, maximum=10000)
+AGENT_REQUEUE_DELAY_SECONDS = env_float("DREAMINA_AGENT_REQUEUE_DELAY_SECONDS", 0.5, minimum=0.05, maximum=30.0)
+
+@dataclass(frozen=True)
+class AgentJob:
+    kind: Literal["plan", "generate", "retry", "resume"]
+    run_id: str
+    scene_id: Optional[str] = None
+    user_id: Optional[str] = None
+    bypass_user_limits: bool = False
+    created_at: float = 0.0
+
+    @property
+    def key(self) -> str:
+        return f"{self.kind}:{self.run_id}:{self.scene_id or ''}"
+
 cookie_pool: Dict[str, Cookie] = {
     "cookie-1": Cookie(
         id="cookie-1",
@@ -352,9 +409,11 @@ task_queue: asyncio.Queue = asyncio.Queue()
 active_workers = []
 agent_runs: Dict[str, AgentRun] = {}
 uploaded_references: Dict[str, UploadedReference] = {}
-
-def env_flag(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+agent_job_queue: asyncio.Queue = asyncio.Queue(maxsize=AGENT_MAX_QUEUE_SIZE)
+agent_queued_jobs: Dict[str, AgentJob] = {}
+agent_active_jobs: Dict[str, AgentJob] = {}
+agent_scheduler_lock = asyncio.Lock()
+agent_worker_tasks: List[asyncio.Task] = []
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
@@ -1310,9 +1369,14 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
             scene.failureSubmitId = shot.failureSubmitId
             scene.failureLogId = shot.failureLogId
             scene.jimengSubmitId = shot.jimengSubmitId
+            scene.jimengAccountId = shot.jimengAccountId
+            scene.jimengAccountAlias = shot.jimengAccountAlias
             scene.queuePosition = shot.queuePosition
             scene.queueTotal = shot.queueTotal
             scene.queueStatus = shot.queueStatus
+            scene.queueAhead = shot.queueAhead
+            scene.queueActive = shot.queueActive
+            scene.queueCapacity = shot.queueCapacity
             scene.queueUpdatedAt = shot.queueUpdatedAt
         synced_scenes.append(scene)
 
@@ -1325,16 +1389,23 @@ def sync_run_from_shots(run: AgentRun) -> AgentRun:
             run.stage = "jimeng_generating"
         if all(scene.status in {"completed", "failed"} for scene in run.scenes):
             completed_scenes = [scene for scene in run.scenes if scene.status == "completed" and scene.videoUrl]
-            run.status = "completed" if completed_scenes else "failed"
-            run.stage = "completed" if completed_scenes else "failed"
-            run.progress = 100 if completed_scenes else run.progress
+            failed_scenes = [scene for scene in run.scenes if scene.status == "failed"]
+            run.status = "failed" if failed_scenes else "completed"
+            run.stage = "failed" if failed_scenes else "completed"
+            run.progress = 100
             run.finalVideoUrl = completed_scenes[0].videoUrl if completed_scenes else None
-            if not completed_scenes:
+            if failed_scenes:
                 failed_scene = next((scene for scene in run.scenes if scene.status == "failed"), None)
-                if failed_scene and failed_scene.failureTitle:
-                    run.error = f"所有即梦分镜任务均未成功生成；首个失败原因：{failed_scene.failureTitle}"
+                failed_reason = failed_scene.failureTitle if failed_scene and failed_scene.failureTitle else "即梦生成失败"
+                if completed_scenes:
+                    run.error = (
+                        f"{len(failed_scenes)} 个分镜生成失败，已完成 {len(completed_scenes)} 个；"
+                        f"首个失败原因：{failed_reason}。可点击失败分镜重试。"
+                    )
                 else:
-                    run.error = "所有即梦分镜任务均未成功生成"
+                    run.error = f"所有即梦分镜任务均未成功生成；首个失败原因：{failed_reason}"
+            else:
+                run.error = None
     run.updatedAt = time.time()
     return persist_agent_run(run)
 
@@ -1358,9 +1429,14 @@ def clear_generation_failure(shot: Shot) -> None:
 
 def clear_generation_queue(shot: Shot) -> None:
     shot.jimengSubmitId = None
+    shot.jimengAccountId = None
+    shot.jimengAccountAlias = None
     shot.queuePosition = None
     shot.queueTotal = None
     shot.queueStatus = None
+    shot.queueAhead = None
+    shot.queueActive = None
+    shot.queueCapacity = None
     shot.queueUpdatedAt = None
 
 def apply_generation_error_to_shot(shot: Shot, exc: Exception) -> None:
@@ -1376,18 +1452,215 @@ def apply_jimeng_progress_to_shot(shot: Shot, update: Dict[str, Any]) -> None:
     submit_id = update.get("submitId")
     if submit_id:
         shot.jimengSubmitId = str(submit_id)
+    account_id = update.get("accountId")
+    if account_id:
+        shot.jimengAccountId = str(account_id)
+    account_alias = update.get("accountAlias")
+    if account_alias:
+        shot.jimengAccountAlias = str(account_alias)
 
     queue_info = update.get("queueInfo")
     if isinstance(queue_info, dict):
         shot.queuePosition = queue_info.get("position")
         shot.queueTotal = queue_info.get("total")
         shot.queueStatus = queue_info.get("status")
+        shot.queueAhead = queue_info.get("ahead")
+        shot.queueActive = queue_info.get("active")
+        shot.queueCapacity = queue_info.get("capacity")
         shot.queueUpdatedAt = time.time()
 
     status = str(update.get("status") or "").lower()
-    if status in {"querying", "queueing", "queued", "pending", "submitted"}:
+    if status == "account_pool_waiting":
+        shot.status = "waiting"
+        shot.progress = max(shot.progress, 5)
+    elif status == "account_acquired":
+        shot.queuePosition = None
+        shot.queueTotal = None
+        shot.queueStatus = "account_acquired"
+        shot.queueAhead = None
+        shot.queueActive = None
+        shot.queueCapacity = None
+        shot.queueUpdatedAt = time.time()
         shot.status = "generating"
         shot.progress = max(shot.progress, 8)
+    elif status in {"querying", "queueing", "queued", "pending", "submitted"}:
+        shot.status = "generating"
+        shot.progress = max(shot.progress, 8)
+
+def make_agent_job(
+    kind: Literal["plan", "generate", "retry", "resume"],
+    run: AgentRun,
+    *,
+    scene_id: Optional[str] = None,
+    bypass_user_limits: bool = False,
+) -> AgentJob:
+    return AgentJob(
+        kind=kind,
+        run_id=run.id,
+        scene_id=scene_id,
+        user_id=run.userId,
+        bypass_user_limits=bypass_user_limits,
+        created_at=time.time(),
+    )
+
+def count_agent_jobs_by_user(user_id: str) -> tuple[int, int]:
+    active_run_ids = {
+        job.run_id
+        for job in agent_active_jobs.values()
+        if job.user_id == user_id and not job.bypass_user_limits
+    }
+    queued_run_ids = {
+        job.run_id
+        for job in agent_queued_jobs.values()
+        if job.user_id == user_id and not job.bypass_user_limits
+    }
+    return len(active_run_ids), len(queued_run_ids)
+
+def count_jobs_by_kind(jobs: List[AgentJob]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for job in jobs:
+        counts[job.kind] = counts.get(job.kind, 0) + 1
+    return counts
+
+def ensure_agent_job_acceptable_locked(job: AgentJob) -> None:
+    if job.key in agent_queued_jobs or job.key in agent_active_jobs:
+        return
+    if agent_job_queue.full():
+        raise HTTPException(status_code=429, detail="当前提交量较高，创作队列已满，请稍后重试")
+    if not job.bypass_user_limits and job.user_id and AGENT_USER_QUEUED_RUN_LIMIT > 0:
+        _, queued_count = count_agent_jobs_by_user(job.user_id)
+        if queued_count >= AGENT_USER_QUEUED_RUN_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=f"当前账号等待中的创作任务已达上限（{AGENT_USER_QUEUED_RUN_LIMIT} 个），请等待部分任务开始后再提交",
+            )
+
+async def ensure_agent_job_capacity(
+    kind: Literal["plan", "generate", "retry", "resume"],
+    run: AgentRun,
+    *,
+    scene_id: Optional[str] = None,
+    bypass_user_limits: bool = False,
+) -> None:
+    job = make_agent_job(kind, run, scene_id=scene_id, bypass_user_limits=bypass_user_limits)
+    async with agent_scheduler_lock:
+        ensure_agent_job_acceptable_locked(job)
+
+async def enqueue_agent_job(
+    kind: Literal["plan", "generate", "retry", "resume"],
+    run: AgentRun,
+    *,
+    scene_id: Optional[str] = None,
+    bypass_user_limits: bool = False,
+) -> Dict[str, Any]:
+    job = make_agent_job(kind, run, scene_id=scene_id, bypass_user_limits=bypass_user_limits)
+    async with agent_scheduler_lock:
+        if job.key in agent_queued_jobs or job.key in agent_active_jobs:
+            return {
+                "status": "already_queued",
+                "jobKey": job.key,
+                "queuePosition": agent_job_queue.qsize(),
+            }
+        ensure_agent_job_acceptable_locked(job)
+        agent_job_queue.put_nowait(job)
+        agent_queued_jobs[job.key] = job
+        return {
+            "status": "queued",
+            "jobKey": job.key,
+            "queuePosition": agent_job_queue.qsize(),
+        }
+
+async def claim_agent_job(job: AgentJob) -> bool:
+    async with agent_scheduler_lock:
+        if job.key not in agent_queued_jobs:
+            return False
+        if (
+            not job.bypass_user_limits
+            and job.user_id
+            and AGENT_USER_ACTIVE_RUN_LIMIT > 0
+            and count_agent_jobs_by_user(job.user_id)[0] >= AGENT_USER_ACTIVE_RUN_LIMIT
+        ):
+            return False
+        agent_queued_jobs.pop(job.key, None)
+        agent_active_jobs[job.key] = job
+        return True
+
+async def requeue_agent_job(job: AgentJob) -> None:
+    async with agent_scheduler_lock:
+        if job.key in agent_active_jobs:
+            return
+        agent_queued_jobs[job.key] = job
+    await asyncio.sleep(max(AGENT_REQUEUE_DELAY_SECONDS, 0.05))
+    await agent_job_queue.put(job)
+
+async def release_agent_job(job: AgentJob) -> None:
+    async with agent_scheduler_lock:
+        agent_active_jobs.pop(job.key, None)
+
+async def dispatch_agent_job(job: AgentJob) -> None:
+    if job.kind == "plan":
+        await process_agent_run(job.run_id)
+    elif job.kind == "generate":
+        await process_confirmed_run(job.run_id)
+    elif job.kind == "retry":
+        if not job.scene_id:
+            raise RuntimeError("Retry Agent job is missing scene_id")
+        await process_scene_retry(job.run_id, job.scene_id)
+    elif job.kind == "resume":
+        await resume_confirmed_run(job.run_id)
+    else:
+        raise RuntimeError(f"Unsupported Agent job kind: {job.kind}")
+
+async def agent_worker(worker_id: int) -> None:
+    logger.info("Agent worker %s started.", worker_id)
+    while True:
+        try:
+            job = await agent_job_queue.get()
+            claimed = False
+            try:
+                claimed = await claim_agent_job(job)
+                if not claimed:
+                    await requeue_agent_job(job)
+                    continue
+                logger.info("Agent worker %s handling %s.", worker_id, job.key)
+                await dispatch_agent_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Agent job %s failed unexpectedly: %s", job.key, exc)
+            finally:
+                if claimed:
+                    await release_agent_job(job)
+                agent_job_queue.task_done()
+        except asyncio.CancelledError:
+            logger.info("Agent worker %s stopped.", worker_id)
+            break
+
+def start_agent_workers() -> None:
+    if agent_worker_tasks:
+        return
+    for index in range(AGENT_WORKER_COUNT):
+        task = asyncio.create_task(agent_worker(index + 1))
+        agent_worker_tasks.append(task)
+        active_workers.append(task)
+
+def get_agent_queue_snapshot() -> Dict[str, Any]:
+    queued_jobs = list(agent_queued_jobs.values())
+    active_jobs = list(agent_active_jobs.values())
+    max_queue_size = agent_job_queue.maxsize or AGENT_MAX_QUEUE_SIZE
+    return {
+        "queueSize": agent_job_queue.qsize(),
+        "trackedQueuedJobs": len(queued_jobs),
+        "activeJobs": len(active_jobs),
+        "workerCount": AGENT_WORKER_COUNT,
+        "maxQueueSize": max_queue_size,
+        "availableQueueSlots": max(max_queue_size - agent_job_queue.qsize(), 0),
+        "userActiveRunLimit": AGENT_USER_ACTIVE_RUN_LIMIT,
+        "userQueuedRunLimit": AGENT_USER_QUEUED_RUN_LIMIT,
+        "queuedByKind": count_jobs_by_kind(queued_jobs),
+        "activeByKind": count_jobs_by_kind(active_jobs),
+        "oldShotQueueSize": task_queue.qsize(),
+    }
 
 async def process_agent_run(run_id: str) -> None:
     run = agent_runs.get(run_id)
@@ -1597,6 +1870,8 @@ async def generate_single_scene(run: AgentRun, scene: AgentRunScene, settings: A
             shot.progress = 100
             shot.status = "completed"
             shot.queueStatus = "Finish"
+            shot.jimengAccountId = result.account_id or shot.jimengAccountId
+            shot.jimengAccountAlias = result.account_alias or shot.jimengAccountAlias
         else:
             raise RuntimeError(f"不支持的即梦接入模式：{settings.jimengMode}")
     except (JimengCliError, RuntimeError) as exc:
@@ -1698,12 +1973,15 @@ async def resume_confirmed_run(run_id: str) -> None:
         persist_agent_run(run)
         logger.exception("Resumed Agent run %s failed: %s", run_id, exc)
 
-def schedule_persisted_agent_runs() -> None:
+async def schedule_persisted_agent_runs() -> None:
     for run in list(agent_runs.values()):
-        if run.status in {"queued", "planning"} and not run.candidates and not run.scenes:
-            asyncio.create_task(process_agent_run(run.id))
-        elif run.status in {"queued", "generating"} and run.scenes:
-            asyncio.create_task(resume_confirmed_run(run.id))
+        try:
+            if run.status in {"queued", "planning"} and not run.candidates and not run.scenes:
+                await enqueue_agent_job("plan", run)
+            elif run.status in {"queued", "generating"} and run.scenes:
+                await enqueue_agent_job("resume", run)
+        except HTTPException as exc:
+            logger.warning("Skipped persisted Agent run %s during startup scheduling: %s", run.id, exc.detail)
 
 async def process_scene_retry(run_id: str, scene_id: str) -> None:
     run = agent_runs.get(run_id)
@@ -1884,13 +2162,16 @@ async def startup_event():
     # Start background task queue worker
     worker_task = asyncio.create_task(queue_worker())
     active_workers.append(worker_task)
-    schedule_persisted_agent_runs()
+    start_agent_workers()
+    await schedule_persisted_agent_runs()
 
 @app.on_event("shutdown")
 async def shutdown_event():
     for w in active_workers:
         w.cancel()
     await asyncio.gather(*active_workers, return_exceptions=True)
+    active_workers.clear()
+    agent_worker_tasks.clear()
 
 # ==========================================
 # REST API Routes
@@ -2134,6 +2415,7 @@ def reject_admin_recharge_request(
 def get_admin_stats(_: UserRecord = Depends(require_admin)):
     users = list(load_users().values())
     transactions = load_credit_transactions()
+    agent_queue = get_agent_queue_snapshot()
     pending_recharge_requests = [
         request for request in load_admin_recharge_requests(limit=500)
         if request.status in {"pending", "processing"}
@@ -2152,7 +2434,9 @@ def get_admin_stats(_: UserRecord = Depends(require_admin)):
         "recentLogins": len(recent_logins),
         "adminUsers": len([user for user in users if user.role == "admin"]),
         "generatedShots": len(shots_db),
-        "queueSize": task_queue.qsize(),
+        "queueSize": agent_queue["queueSize"],
+        "legacyShotQueueSize": task_queue.qsize(),
+        "agentQueue": agent_queue,
         "agentRuns": len(agent_runs),
         "activeAgentRuns": len(active_agent_runs),
         "failedAgentRuns": len(failed_agent_runs),
@@ -2197,13 +2481,18 @@ def update_agent_config(payload: AgentSettingsUpdate, _: UserRecord = Depends(re
 @app.get("/admin/agent/status")
 def get_agent_status(_: UserRecord = Depends(require_admin)):
     settings = load_agent_settings()
+    agent_queue = get_agent_queue_snapshot()
+    cli_status = cli_public_status()
     active_runs = [sync_run_from_shots(run) for run in agent_runs.values()]
     active_runs = sorted(active_runs, key=lambda item: item.updatedAt, reverse=True)
     return {
         "config": agent_settings_to_public(settings),
-        "queueSize": task_queue.qsize(),
+        "queueSize": agent_queue["queueSize"],
+        "activeAgentJobs": agent_queue["activeJobs"],
+        "agentQueue": agent_queue,
         "activeCookies": len([cookie for cookie in cookie_pool.values() if cookie.status == "active"]),
         "busyCookies": len([cookie for cookie in cookie_pool.values() if cookie.activeTasks > 0]),
+        "jimengAccountPool": cli_status.get("accountPool", []),
         "runningRuns": len([
             run for run in active_runs
             if run.status in {"queued", "planning", "awaiting_confirmation", "generating"}
@@ -2264,7 +2553,6 @@ def get_agent_upload_content(image_id: str, current_user: UserRecord = Depends(g
 @app.post("/agent/runs", response_model=AgentRun)
 async def create_agent_run(
     payload: AgentCreatePayload,
-    background_tasks: BackgroundTasks,
     current_user: UserRecord = Depends(get_current_user),
 ):
     if not payload.idea.strip():
@@ -2315,8 +2603,14 @@ async def create_agent_run(
         createdAt=time.time(),
         updatedAt=time.time(),
     )
+    await ensure_agent_job_capacity("plan", run, bypass_user_limits=current_user.role == "admin")
     persist_agent_run(run)
-    background_tasks.add_task(process_agent_run, run_id)
+    try:
+        await enqueue_agent_job("plan", run, bypass_user_limits=current_user.role == "admin")
+    except HTTPException:
+        agent_runs.pop(run.id, None)
+        persist_agent_runs()
+        raise
     return run
 
 @app.get("/agent/runs", response_model=List[AgentRun])
@@ -2333,7 +2627,6 @@ def list_agent_runs(limit: int = 20, current_user: UserRecord = Depends(get_curr
 async def confirm_agent_run(
     run_id: str,
     payload: AgentConfirmPayload,
-    background_tasks: BackgroundTasks,
     current_user: UserRecord = Depends(get_current_user),
 ):
     run = agent_runs.get(run_id)
@@ -2365,6 +2658,7 @@ async def confirm_agent_run(
         start = end
 
     credit_cost = calculate_video_credit_cost(run.jimengModel, [scene.duration for scene in payload.scenes])
+    await ensure_agent_job_capacity("generate", run, bypass_user_limits=current_user.role == "admin")
     charge_user_credits(
         run.userEmail,
         credit_cost,
@@ -2382,14 +2676,29 @@ async def confirm_agent_run(
     run.progress = 20
     run.updatedAt = time.time()
     persist_agent_run(run)
-    background_tasks.add_task(process_confirmed_run, run.id)
+    try:
+        await enqueue_agent_job("generate", run, bypass_user_limits=current_user.role == "admin")
+    except HTTPException:
+        refund_user_credits(
+            run.userEmail,
+            credit_cost,
+            "生成队列满自动退回：创作任务未能进入后台队列",
+            run_id=run.id,
+        )
+        run.status = "awaiting_confirmation"
+        run.stage = "awaiting_confirmation"
+        run.progress = 20
+        run.creditCost = 0
+        run.creditChargedAt = None
+        run.updatedAt = time.time()
+        persist_agent_run(run)
+        raise
     return run
 
 @app.post("/agent/runs/{run_id}/scenes/{scene_id}/retry", response_model=AgentRun)
 async def retry_agent_scene(
     run_id: str,
     scene_id: str,
-    background_tasks: BackgroundTasks,
     current_user: UserRecord = Depends(get_current_user),
 ):
     run = agent_runs.get(run_id)
@@ -2405,7 +2714,14 @@ async def retry_agent_scene(
     if scene.status != "failed":
         raise HTTPException(status_code=409, detail="只有失败的分镜可以单独重试")
 
+    previous_scene = scene
     retry_cost = get_scene_credit_cost(run, scene)
+    await ensure_agent_job_capacity(
+        "retry",
+        run,
+        scene_id=scene_id,
+        bypass_user_limits=current_user.role == "admin",
+    )
     charge_user_credits(
         run.userEmail,
         retry_cost,
@@ -2426,9 +2742,14 @@ async def retry_agent_scene(
             "failureSubmitId": None,
             "failureLogId": None,
             "jimengSubmitId": None,
+            "jimengAccountId": None,
+            "jimengAccountAlias": None,
             "queuePosition": None,
             "queueTotal": None,
             "queueStatus": None,
+            "queueAhead": None,
+            "queueActive": None,
+            "queueCapacity": None,
             "queueUpdatedAt": None,
             "creditRefundedAt": None,
             "refundCredit": 0,
@@ -2454,7 +2775,29 @@ async def retry_agent_scene(
         caption=f"{scene.title} / {run.ratio}",
     )
     persist_agent_run(run)
-    background_tasks.add_task(process_scene_retry, run.id, scene_id)
+    try:
+        await enqueue_agent_job(
+            "retry",
+            run,
+            scene_id=scene_id,
+            bypass_user_limits=current_user.role == "admin",
+        )
+    except HTTPException:
+        refund_user_credits(
+            run.userEmail,
+            retry_cost,
+            "重试队列满自动退回：分镜未能进入后台队列",
+            run_id=run.id,
+        )
+        run.scenes = [
+            previous_scene if item.id == scene_id else item
+            for item in run.scenes
+        ]
+        shots_db.pop(scene_id, None)
+        run = sync_run_from_shots(run)
+        run.updatedAt = time.time()
+        persist_agent_run(run)
+        raise
     return sync_run_from_shots(run)
 
 @app.get("/agent/runs/{run_id}", response_model=AgentRun)
@@ -2469,12 +2812,15 @@ def get_agent_run(run_id: str, current_user: UserRecord = Depends(get_current_us
 @app.get("/health")
 def health_check():
     """Return hardware status and backend health information."""
+    agent_queue = get_agent_queue_snapshot()
     return {
         "status": "healthy",
         "cpu_usage_pct": round(random.uniform(5.0, 15.0), 1),
         "vram_allocated_gb": 0.0,
-        "concurrency_limit": 2,
-        "queue_size": task_queue.qsize(),
+        "concurrency_limit": agent_queue["workerCount"],
+        "queue_size": agent_queue["queueSize"],
+        "agent_queue": agent_queue,
+        "legacy_shot_queue_size": task_queue.qsize(),
         "timestamp": time.time(),
         "jimeng_cli": cli_public_status(),
         "database": database.public_status(),

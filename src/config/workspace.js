@@ -31,10 +31,11 @@ export const agentStageIndexes = {
   jimeng_dispatch: 3,
   jimeng_generating: 3,
   completed: 4,
+  failed: 3,
 };
 
 export const AGENT_FAST_POLL_INTERVAL = 1200;
-export const AGENT_POLL_INTERVAL = 60000;
+export const AGENT_POLL_INTERVAL = 10000;
 
 export const initialWorkspace = {
   idea: '',

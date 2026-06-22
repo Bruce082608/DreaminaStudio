@@ -262,6 +262,10 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
   const jimengAccountInfo = jimengAccount?.account || {};
   const jimengSummary = jimengAccount?.summary || {};
   const recentJimengTasks = Array.isArray(jimengAccount?.tasks) ? jimengAccount.tasks : [];
+  const agentQueue = agentStatus?.agentQueue || stats?.agentQueue || {};
+  const jimengAccountPool = Array.isArray(agentStatus?.jimengAccountPool) ? agentStatus.jimengAccountPool : [];
+  const jimengPoolCapacity = jimengAccountPool.reduce((total, account) => total + (Number(account.maxConcurrent) || 0), 0);
+  const jimengPoolActive = jimengAccountPool.reduce((total, account) => total + (Number(account.activeLeases) || 0), 0);
   const creditBalance = billingState?.billing?.balance ?? auth?.user?.creditBalance ?? 0;
   const pendingRechargeCount = rechargeRequests.filter((request) => ['pending', 'processing'].includes(request.status)).length;
 
@@ -276,7 +280,7 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
     { label: '待审充值', value: stats?.pendingRechargeRequests ?? pendingRechargeCount, icon: Clock3 },
     { label: '运行中', value: stats?.activeAgentRuns ?? '-', icon: Loader2 },
     { label: '失败任务', value: stats?.failedAgentRuns ?? '-', icon: AlertTriangle },
-    { label: '队列长度', value: stats?.queueSize ?? '-', icon: Workflow },
+    { label: '队列长度', value: stats?.agentQueue?.queueSize ?? stats?.queueSize ?? '-', icon: Workflow },
   ];
 
   const adminInsights = [
@@ -288,14 +292,14 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
     },
     {
       label: '当前队列',
-      value: `${agentStatus?.queueSize ?? 0}`,
-      text: `${agentStatus?.runningRuns ?? 0} 个任务运行中，${agentStatus?.failedRuns ?? 0} 个任务失败。`,
+      value: `${agentQueue.queueSize ?? agentStatus?.queueSize ?? 0}/${agentQueue.maxQueueSize ?? '-'}`,
+      text: `${agentQueue.activeJobs ?? 0} 个任务处理中，${agentQueue.workerCount ?? 0} 个 worker，${agentStatus?.failedRuns ?? 0} 个失败任务。`,
       icon: Workflow,
     },
     {
       label: '即梦账号',
       value: formatNumber(jimengAccountInfo.total_credit, '未登录'),
-      text: `${formatJimengVip(jimengAccountInfo.vip_level)}，近期 ${jimengSummary.totalTasks ?? 0} 条调用记录。`,
+      text: `${formatJimengVip(jimengAccountInfo.vip_level)}，账号池 ${jimengPoolActive}/${jimengPoolCapacity || 1} 个槽位占用。`,
       icon: Clapperboard,
     },
     {
@@ -557,6 +561,11 @@ export default function AdminPage({ auth, billingState, onShowCredits, onShowInt
                     <span>运行中任务</span>
                     <strong>{agentStatus?.runningRuns ?? 0}</strong>
                     <small>{agentStatus?.failedRuns ?? 0} 个失败任务</small>
+                  </div>
+                  <div className="agent-status-card">
+                    <span>创作队列</span>
+                    <strong>{agentQueue.queueSize ?? 0}/{agentQueue.maxQueueSize ?? '-'}</strong>
+                    <small>{agentQueue.activeJobs ?? 0} 个处理中 / {agentQueue.workerCount ?? 0} 个 worker</small>
                   </div>
                 </div>
 

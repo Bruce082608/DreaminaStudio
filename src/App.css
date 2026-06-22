@@ -2813,9 +2813,7 @@
 .queue-position-card small {
   display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .queue-position-card strong {
@@ -3321,6 +3319,8 @@
   align-items: center;
   gap: 0.34rem;
   min-width: 0;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
 }
 
 .scene-queue-info em {
